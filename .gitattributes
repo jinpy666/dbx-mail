@@ -1,0 +1,11 @@
+# 统一换行符：仓库内与检出都使用 LF，避免 Windows 本地提交把 CRLF 带进 CI 脚本
+* text=auto eol=lf
+
+# 二进制资源不做换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.dbxp binary
+*.zip binary

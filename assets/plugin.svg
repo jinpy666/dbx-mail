@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#ececef"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="27" fill="#242428"/>
+  <!-- 信封 -->
+  <rect x="20" y="38" width="88" height="58" rx="9" fill="url(#paper)"/>
+  <!-- 信封折角：企鹅头巾的 V 形 -->
+  <path d="M20 47.5 64 79l44-31.5V56L64 88 20 56Z" fill="#e8660c"/>
+  <!-- 企鹅脸 -->
+  <ellipse cx="64" cy="58" rx="17" ry="15" fill="#242428"/>
+  <ellipse cx="57" cy="59" rx="6.5" ry="8" fill="#f7f7f8"/>
+  <ellipse cx="71" cy="59" rx="6.5" ry="8" fill="#f7f7f8"/>
+  <circle cx="58" cy="57" r="2.4" fill="#242428"/>
+  <circle cx="70" cy="57" r="2.4" fill="#242428"/>
+  <path d="M64 62.5 70.5 67 64 71.5 57.5 67Z" fill="#e8660c"/>
+</svg>

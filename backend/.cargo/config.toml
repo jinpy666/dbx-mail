@@ -1,0 +1,10 @@
+# Cargo 源配置：国内镜像（crates.io 在部分网络环境下不可直连）
+# 只影响本插件的 Sidecar 构建，不修改用户全局配置。
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[net]
+git-fetch-with-cli = true

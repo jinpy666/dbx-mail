@@ -1,0 +1,17 @@
+# DBX 插件打包配置
+# schema_version 固定为 1；include 中的目录会按相对路径打进 .dbxp
+schema_version = 1
+
+# 原生 Sidecar（Rust）：IMAP/SMTP 网络、SQLite 缓存、附件与 .eml 文件系统读写
+[backend]
+language = "rust"
+directory = "backend"
+binary = "backend"
+
+[package]
+# LICENSE / THIRD-PARTY-NOTICES.md / licenses/ 随包分发
+include = ["assets", "ui", "LICENSE", "THIRD-PARTY-NOTICES.md", "licenses"]
+
+[dev]
+# Windows 下 CLI 以 \\?\ 前缀路径作为 cwd 调用构建命令，CMD 不支持该路径，
+# 因此不在此处挂 ui_build；开发时先执行 npm run build。

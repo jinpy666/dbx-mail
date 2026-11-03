@@ -1,0 +1,26 @@
+# 构建产物 / 依赖（一律锚定根目录：写 `ui/` 会连带忽略 src/components/ui/）
+/node_modules/
+/ui/
+/dist/
+/release/
+/backend/target/
+/bin/
+/.dbx-dev/
+/fixtures/
+/.tmp/
+
+*.log
+.DS_Store
+.env
+.env.*
+
+# 编辑器 / 本地工作区（含会话记录与草稿，不进公开仓库）
+.workbuddy/
+.vscode/
+.idea/
+.playwright-cli/
+
+# 回归脚本产出的临时截图（含本机演示数据，仅供本地核对）
+screenshots/rich-*.png
+screenshots/scroll-*.png
+screenshots/folder-sync.png
