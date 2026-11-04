@@ -15,6 +15,7 @@ mod files;
 mod imap;
 mod mime;
 mod model;
+mod net_guard;
 mod secrets;
 mod smtp;
 mod stream;
@@ -828,11 +829,12 @@ fn mail_fetch_image(app: &Arc<App>, params: &Value) -> RpcResult {
     let host = parsed
         .host_str()
         .ok_or_else(|| RpcError::invalid("图片地址缺少主机名"))?;
-    ensure_public_host(host)?;
+    // 首个 URL 与每一跳重定向都要过白名单，否则 302 一跳就能进内网
+    net_guard::check_host(host).map_err(|reason| RpcError::invalid(reason.message()))?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::limited(3))
+        .redirect(net_guard::redirect_policy())
         .build()
         .map_err(|error| RpcError::internal(format!("创建请求失败：{error}")))?;
     let result = app.rt.block_on(async {
@@ -874,40 +876,6 @@ fn mail_fetch_image(app: &Arc<App>, params: &Value) -> RpcResult {
         "mime": result.0,
         "dataUrl": format!("data:{};base64,{}", result.0, result.1),
     }))
-}
-
-/// 阻止访问环回、内网、链路本地地址（避免被邮件 HTML 当成 SSRF 跳板）
-fn ensure_public_host(host: &str) -> Result<(), RpcError> {
-    use std::net::ToSocketAddrs;
-    let lower = host.to_lowercase();
-    if lower == "localhost" || lower.ends_with(".local") || lower.ends_with(".internal") {
-        return Err(RpcError::invalid("不允许请求本机地址"));
-    }
-    let addresses = (host, 0u16)
-        .to_socket_addrs()
-        .map_err(|_| RpcError::invalid("无法解析图片主机"))?;
-    for address in addresses {
-        let ip = address.ip();
-        let blocked = match ip {
-            std::net::IpAddr::V4(value) => {
-                value.is_loopback()
-                    || value.is_private()
-                    || value.is_link_local()
-                    || value.is_broadcast()
-                    || value.is_unspecified()
-            }
-            std::net::IpAddr::V6(value) => {
-                value.is_loopback()
-                    || value.is_unspecified()
-                    || (value.segments()[0] & 0xfe00) == 0xfc00
-                    || (value.segments()[0] & 0xffc0) == 0xfe80
-            }
-        };
-        if blocked {
-            return Err(RpcError::invalid("不允许请求内网地址"));
-        }
-    }
-    Ok(())
 }
 
 /* ---------------- 参数工具 ---------------- */

@@ -17,6 +17,7 @@ import {
   X,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { sanitizeComposerHtml } from '../lib/html'
 import { t } from '../lib/i18n'
 import { displayName, emailOf, formatBytes } from '../lib/format'
 import { useComposer } from '../stores/composer'
@@ -58,7 +59,9 @@ function ComposerWindow({ composer, stacked }: { composer: Composer; stacked: bo
   useEffect(() => {
     const element = bodyRef.current
     if (!element) return
-    if (element.innerHTML !== composer.html) element.innerHTML = composer.html
+    // 最后一道收口：不管内容来自回复引用、草稿还是将来的新路径，赋值前统一净化
+    const safe = sanitizeComposerHtml(composer.html)
+    if (element.innerHTML !== safe) element.innerHTML = safe
     // 仅在切换草稿/新建时灌入初始内容，避免每次输入重设光标
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [composer.key])

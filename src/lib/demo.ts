@@ -22,6 +22,7 @@ export const demoEnabled =
   typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('demo')
 
 const now = Date.now()
+const second = 1_000
 const minute = 60_000
 const hour = 60 * minute
 const day = 24 * hour
@@ -301,11 +302,14 @@ const demoThreads: DemoMessage[][] = []
  * ?rich=2 换成「固定 700px 宽 + body{overflow:hidden}」的传统营销邮件模板，
  * 用来复现窄窗口下正文被裁切、滚不动的问题（scripts/render-check-scroll.mjs）。
  */
-const richParam = new URLSearchParams(
+const demoSearch = new URLSearchParams(
   typeof window === 'undefined' ? '' : window.location.search,
-).get('rich')
+)
+const richParam = demoSearch.get('rich')
 const richSample = richParam !== null
 const scrollSample = richParam === '2'
+/** ?evil=1：挂一封刻意构造的恶意邮件，供 scripts/sanitize-check.mjs 做注入回归 */
+const evilSample = demoSearch.get('evil') !== null
 
 const scrollSampleHtml = `<style>
   html, body { height: 100%; overflow: hidden; margin: 0; padding: 0; }
@@ -377,6 +381,39 @@ const richSampleHtml = `<style>
 </div>`
 
 {
+  if (evilSample) {
+    // 每条载荷都会往 window.__dbxXss 写标记：只要它出现，就说明注入成功了
+    const evilSampleHtml = `<style>
+  body { background: url(https://evil.example/track-body.png); }
+  .lead { font-size: 15px; color: #1f2328; }
+</style>
+<div class="lead" style="background-image:url(https://evil.example/track-inline.png)">
+  <p>这是一封用于注入回归的样例邮件，正文看起来一切正常。</p>
+  <img src="x" onerror="window.__dbxXss = 'img-onerror'" alt="bad-image">
+  <img src="https://evil.example/beacon.gif" width="1" height="1" alt="">
+  <a href="javascript:window.__dbxXss='js-href'">看起来是普通链接</a>
+  <a href="https://example.com/ok">正常链接</a>
+  <iframe src="https://evil.example/frame"></iframe>
+  <svg onload="window.__dbxXss='svg-onload'"><circle r="10"></circle></svg>
+  <script>window.__dbxXss = 'script-tag'</script>
+  <form action="https://evil.example/post"><input name="secret" value="1"></form>
+  <p>结尾段落，用于确认正文仍然渲染。</p>
+</div>`
+    const item = makeThread({
+      accountId: 1,
+      mailboxRole: 'inbox',
+      subject: '[安全回归] 含脚本与远程资源的邮件',
+      fromName: 'Security Probe',
+      fromAddr: 'probe@evil.example',
+      to: ['dana@fernwood.example'],
+      date: now - 30 * second,
+      snippet: '这是一封用于注入回归的样例邮件，正文看起来一切正常。',
+      unread: true,
+      body: '这是一封用于注入回归的样例邮件，正文看起来一切正常。',
+      html: evilSampleHtml,
+    })
+    demoThreads.push(item.messages)
+  }
   if (richSample) {
     const item = makeThread({
       accountId: 1,
@@ -718,7 +755,7 @@ function counts() {
 
 function bootstrap(): Bootstrap {
   return {
-    version: '0.1.3',
+    version: '0.1.4',
     dataDir: 'C:\\Users\\demo\\AppData\\Roaming\\dbx-mail',
     vault: 'keyring',
     platform: 'windows',
@@ -768,12 +805,12 @@ export function demoInvoke(method: string, rawParams: unknown): Promise<unknown>
   const params = (rawParams ?? {}) as Record<string, unknown>
   switch (method) {
     case 'ping':
-      return Promise.resolve({ ok: true, version: '0.1.3' })
+      return Promise.resolve({ ok: true, version: '0.1.4' })
     case 'app/bootstrap':
       return delay(bootstrap(), 80)
     case 'app/info':
       return Promise.resolve({
-        version: '0.1.3',
+        version: '0.1.4',
         dataDir: 'C:\\Users\\demo\\AppData\\Roaming\\dbx-mail',
         vault: 'keyring',
         platform: 'windows',

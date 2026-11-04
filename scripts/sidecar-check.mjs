@@ -22,10 +22,11 @@ function findBinary() {
   const index = args.indexOf('--bin')
   if (index >= 0 && args[index + 1]) return resolve(args[index + 1])
   const candidates = [
-    join(root, 'backend/target/debug/backend.exe'),
+    // release 优先：debug 目录里常留着很久以前编译的产物，会拿旧版本号误导判断
     join(root, 'backend/target/release/backend.exe'),
-    join(root, 'backend/target/debug/backend'),
+    join(root, 'backend/target/debug/backend.exe'),
     join(root, 'backend/target/release/backend'),
+    join(root, 'backend/target/debug/backend'),
   ]
   const found = candidates.find((path) => existsSync(path))
   if (!found) {

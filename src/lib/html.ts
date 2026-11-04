@@ -23,6 +23,34 @@ const TRACKING_MAX_SIZE = 2
 const IMAGE_CONCURRENCY = 4
 /** style 里的远程地址 */
 const CSS_URL_PATTERN = /url\(\s*(['"]?)((?:https?:)?\/\/[^'")]+)\1\s*\)/gi
+/** 一律禁止的标签：能执行脚本、发起请求或劫持文档结构 */
+const FORBID_TAGS = [
+  'script',
+  'form',
+  'iframe',
+  'object',
+  'embed',
+  'link',
+  'meta',
+  'base',
+  'frame',
+  'frameset',
+  'style',
+]
+/** 一律禁止的属性：srcset / ping 能绕过对 src 的检查 */
+const FORBID_ATTR = ['srcset', 'ping', 'onbegin', 'onend']
+/** 撰写器额外禁止：命名空间标签与媒体标签在编辑器里没有意义 */
+const COMPOSER_FORBID_TAGS = [
+  ...FORBID_TAGS,
+  'svg',
+  'math',
+  'noscript',
+  'template',
+  'audio',
+  'video',
+  'source',
+  'track',
+]
 
 let hooked = false
 
@@ -63,12 +91,99 @@ export function prepareMailBody(html: string, dark = false): MailBody {
   installHook()
   const clean = DOMPurify.sanitize(rest, {
     WHOLE_DOCUMENT: false,
-    FORBID_TAGS: ['form', 'iframe', 'object', 'embed', 'link', 'meta', 'base', 'frame', 'frameset', 'style'],
-    FORBID_ATTR: ['srcset', 'ping', 'onbegin', 'onend'],
+    FORBID_TAGS,
+    FORBID_ATTR,
     ALLOW_DATA_ATTR: true,
     ADD_ATTR: ['target'],
   })
-  return { html: clean, css: scopeCss(css, dark) }
+  // 挂载前就把远程资源换成占位：innerHTML 赋值是同步触发的，等 effect 里再拦
+  // 就已经发出请求了（真实 IP 与「这封邮件被打开过」都会暴露给发件人）
+  const template = document.createElement('template')
+  template.innerHTML = clean
+  prearmRemoteAssets(template.content)
+  return { html: template.innerHTML, css: scopeCss(css, dark) }
+}
+
+/**
+ * 把远程图片就地替换成透明像素，原地址收进 `data-remote`
+ *
+ * `applyImagePolicy` 认得这个属性，用户点「显示图片」时按它取回。
+ * 相对路径的 `src`（邮件里常见 `src="x"`）对本地渲染没有意义，同样占位，
+ * 否则会解析成对插件自身页面的请求。
+ */
+function prearmRemoteAssets(root: DocumentFragment): void {
+  for (const image of Array.from(root.querySelectorAll('img'))) {
+    const src = (image.getAttribute('src') ?? '').trim()
+    if (src.startsWith('data:') || src.startsWith('cid:')) continue
+    if (src) image.dataset.remote = src
+    image.removeAttribute('srcset')
+    image.removeAttribute('sizes')
+    image.setAttribute('src', TRANSPARENT_PIXEL)
+  }
+  for (const element of Array.from(root.querySelectorAll<HTMLElement>('[style*="url("]'))) {
+    const style = element.getAttribute('style') ?? ''
+    const stripped = style.replace(CSS_URL_PATTERN, 'none')
+    if (stripped.trim()) element.setAttribute('style', stripped)
+    else element.removeAttribute('style')
+  }
+  // 老式 <table background="http://…"> 同样是远程请求
+  for (const element of Array.from(root.querySelectorAll('[background]'))) {
+    element.removeAttribute('background')
+  }
+}
+
+/**
+ * 撰写器可用的净化
+ *
+ * 回复/转发会把原邮件正文整段塞进引用块，草稿也可能是历史版本或外部来源；
+ * 这些内容最终都走 `element.innerHTML` 进入 contentEditable，和阅读器一样是
+ * 注入点，必须过同一套白名单。比阅读器更严一点：`<svg>`/`<math>` 一类命名空间
+ * 标签、音视频标签在编辑器里没有意义，直接禁掉。
+ *
+ * 另外把远程图片换成文字占位——引用块里的图既会暴露真实 IP（编辑器不经过
+ * 阅读器的代理与拦截），也会让草稿体积失控；`data:` 内联图（cid）保留。
+ * @param html 待净化的 HTML 片段
+ * @returns 可安全赋给 innerHTML 的 HTML
+ */
+export function sanitizeComposerHtml(html: string): string {
+  if (!html) return ''
+  installHook()
+  const clean = DOMPurify.sanitize(html, {
+    WHOLE_DOCUMENT: false,
+    FORBID_TAGS: COMPOSER_FORBID_TAGS,
+    FORBID_ATTR,
+    ALLOW_DATA_ATTR: true,
+    ADD_ATTR: ['target'],
+  })
+  // template 的 content 是惰性文档片段，赋 innerHTML 不会发起任何请求
+  const template = document.createElement('template')
+  template.innerHTML = clean
+  stripComposerResources(template.content)
+  return template.innerHTML
+}
+
+/** 把引用/草稿里的远程资源摘掉：img 换文字占位，style/background 里的 url() 清空 */
+function stripComposerResources(root: DocumentFragment | Element): void {
+  const ownerDocument = root.ownerDocument ?? window.document
+  for (const image of Array.from(root.querySelectorAll('img'))) {
+    if ((image.getAttribute('src') ?? '').startsWith('data:')) {
+      image.removeAttribute('srcset')
+      continue
+    }
+    const alt = (image.getAttribute('alt') ?? '').trim()
+    const placeholder = ownerDocument.createElement('span')
+    placeholder.textContent = alt ? `[图片：${alt}]` : '[图片]'
+    image.replaceWith(placeholder)
+  }
+  for (const element of Array.from(root.querySelectorAll('[style]'))) {
+    const style = element.getAttribute('style') ?? ''
+    const stripped = style.replace(CSS_URL_PATTERN, 'none')
+    if (stripped.trim()) element.setAttribute('style', stripped)
+    else element.removeAttribute('style')
+  }
+  for (const element of Array.from(root.querySelectorAll('[background]'))) {
+    element.removeAttribute('background')
+  }
 }
 
 /** 抽出所有 `<style>` 块（不完整的标签留给清洗器丢弃） */
@@ -95,6 +210,8 @@ function scopeCss(css: string, dark: boolean): string {
   let cleaned = css
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/@import[^;]*;?/gi, '')
+    // 远程背景图 = 跟踪信标：挂载即请求，直接失效（样式表里的图不提供「显示图片」恢复）
+    .replace(CSS_URL_PATTERN, 'none')
     .replace(/position\s*:\s*(fixed|sticky)/gi, 'position: static')
   if (dark) {
     // 与 adaptForDark 同一策略：摘掉写死的颜色，交给主题变量

@@ -8,6 +8,7 @@ import { create } from 'zustand'
 import * as api from '../lib/rpc'
 import type { Draft, DraftAttachment, MessageDetail } from '../lib/rpc'
 import { escapeHtml, emailOf, formatFullTime, splitAddresses } from '../lib/format'
+import { sanitizeComposerHtml } from '../lib/html'
 import { useMail } from './mail'
 
 export type ComposeMode = 'new' | 'reply' | 'replyAll' | 'forward' | 'draft'
@@ -215,12 +216,16 @@ export function openNewMessage(accountId?: number): string {
 }
 
 function quoteBlock(detail: MessageDetail, locale: string): string {
-  const body = detail.htmlBody || `<p>${escapeHtml(detail.textBody).replace(/\n/g, '<br>')}</p>`
+  // 原邮件正文来自外部发件人，进编辑器前必须过白名单：引用块最终由
+  // Composer 赋给 contentEditable 的 innerHTML，未经净化的 <img onerror> 会直接执行
+  const quoted = sanitizeComposerHtml(
+    detail.htmlBody || `<p>${escapeHtml(detail.textBody).replace(/\n/g, '<br>')}</p>`,
+  )
   const attribution =
     locale === 'en'
       ? `On ${formatFullTime(detail.date, 'en')}, ${escapeHtml(detail.fromName || detail.fromAddr)} wrote:`
       : `在 ${formatFullTime(detail.date, 'zh-CN')}，${escapeHtml(detail.fromName || detail.fromAddr)} 写道：`
-  return `<p><br></p><p style="color:#6e6e76">${attribution}</p><blockquote style="margin:0 0 0 0;padding-left:12px;border-left:2px solid #d8d8de;color:#6e6e76">${body}</blockquote>`
+  return `<p><br></p><p style="color:#6e6e76">${attribution}</p><blockquote style="margin:0 0 0 0;padding-left:12px;border-left:2px solid #d8d8de;color:#6e6e76">${quoted}</blockquote>`
 }
 
 function withPrefix(subject: string, prefix: string): string {
@@ -286,7 +291,8 @@ export function openDraft(draft: Draft): string {
     bcc: draft.bccAddrs.join(', '),
     showCc: draft.ccAddrs.length > 0 || draft.bccAddrs.length > 0,
     subject: draft.subject,
-    html: draft.bodyHtml,
+    // 草稿可能来自旧版本或外部导入，同样按不可信内容处理
+    html: sanitizeComposerHtml(draft.bodyHtml),
     attachments: draft.attachments ?? [],
     inReplyTo: draft.inReplyTo,
     references: draft.references ?? [],
