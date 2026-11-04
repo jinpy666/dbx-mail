@@ -11,7 +11,7 @@
 ## 0. 安装
 
 从 [Releases](https://github.com/mjj3610/dbx-mail/releases) 下载 `com.mjj3610.mail-<版本>-windows-x64.dbxp`，
-或在 DBX 的插件商店里搜索「邮件 / DBX Mail」。当前版本 **0.1.3**（Windows x64，未签名包）。
+或在 DBX 的插件商店里搜索「邮件 / DBX Mail」。当前版本 **0.1.4**（Windows x64，未签名包）。
 
 ![三栏工作台](screenshots/01-inbox.png)
 
@@ -23,7 +23,7 @@
 | 密码 | 系统凭据库（Windows Credential Manager / macOS Keychain / Secret Service）；不可用时退化为 AES-256-GCM 本地加密文件（`secrets.key` + `secrets.bin`，Unix 0600） |
 | 同步 | IMAP 增量同步：`UIDVALIDITY` 变化时重置文件夹、按 `last_uid` 拉新头、旗标双向同步（`pending_flags` 表避免服务器覆盖本地改动）；同步范围可选「主要文件夹 / 全部」；启动 45 秒巡检、可手动同步、可关自动同步 |
 | 会话列表 | 按 `References`/`In-Reply-To`/`Message-ID` 归并会话，会话内计数与未读聚合；过滤（全部 / 未读 / 星标 / 附件）；跨账户「所有收件箱」；搜索主题、摘要、发件人、收件人与正文全文；分页加载 |
-| 阅读器 | 会话内多封邮件折叠展开；正文由 `mail-parser` 解析后本地渲染；HTML 先经 DOMPurify 白名单清洗；**远程图片默认拦截**，点「显示图片」经本地后端代理取回并转 data URL（SSRF 白名单，拒绝环回与内网地址），不向发件人泄露 IP |
+| 阅读器 | 会话内多封邮件折叠展开；正文由 `mail-parser` 解析后本地渲染；HTML 先经 DOMPurify 白名单清洗；**远程图片默认不加载**——挂载前就把 `src` 换成占位，不会自动向图床发起任何请求；用户点「显示图片」后由本地后端代理取回并转 data URL（SSRF 白名单 + 逐跳重定向复核，拒绝环回、内网与 CGNAT） |
 | 附件 | 解析 `mail-parser` 的部件索引，按需从原始邮件取字节；保存时自绘目录选择器选目录、同名自动加序号不覆盖；25 MB 单文件上限（`mail/part` 30 MB） |
 | 撰写 | 富文本（加粗 / 斜体 / 下划线 / 删除线 / 等宽 / 链接 / 引用 / 列表 / 清格式）；多收件人、抄送、密送；多账户切换发件人；签名自动插入；附件拖入或选择；`Ctrl/⌘ + Enter` 发送 |
 | 草稿 | 每 4.5 秒自动存草稿；关闭时可选「存为草稿 / 放弃」；草稿箱可继续编辑，发送后自动删除 |
@@ -52,6 +52,7 @@
 │ sync.rs     增量同步、旗标双向、按需取正文、移动/删除、SMTP 投递 + APPEND 已发送     │
 │ compose.rs  发件箱队列、撤销窗口、定时投递、草稿读写                                │
 │ files.rs    目录浏览、附件保存、上传暂存、.eml 读写、同名去重                        │
+│ net_guard.rs 出网白名单：图片代理的主机校验与逐跳重定向复核                          │
 │ db.rs       SQLite（WAL）：11 张表、会话聚合查询、全文过滤                          │
 │ secrets.rs  keyring → AES-GCM 本地加密兜底                                          │
 │ tls.rs / stream.rs  进程级 rustls ClientConfig、Plain/TLS 流抽象                    │
@@ -70,12 +71,12 @@
 
 | 内容 | 位置 |
 | --- | --- |
-| 账户（不含密码）、文件夹、邮件头、旗标 | `<数据目录>/mail.db`（SQLite，WAL） |
-| 正文缓存 | `mail.db` 的 `bodies` 表；原始邮件另存 `<数据目录>/raw/<account>/<mailbox>/<key>.eml` |
+| 账户（不含密码）、文件夹、邮件头、旗标 | `<数据目录>/dbx-mail.db`（SQLite，WAL） |
+| 正文缓存 | `dbx-mail.db` 的 `bodies` 表；原始邮件另存 `<数据目录>/raw/<account>/<mailbox>/<key>.eml` |
 | 附件 | 不落库字节，只有 `attachments` 元数据；保存时从原始邮件解出直接写到用户选定目录 |
 | 密码 | 系统凭据库；不可用时 `<数据目录>/secrets.bin`（AES-256-GCM，密钥 `secrets.key`） |
 | 上传暂存 | `<数据目录>/tmp/`（撰写器附件先落这里，路径记入草稿） |
-| 设置 | `mail.db` 的 `settings` 表（键值对） |
+| 设置 | `dbx-mail.db` 的 `settings` 表（键值对） |
 
 数据目录由宿主通过环境变量提供（`DBX_PLUGIN_DATA_DIR`），插件不写插件目录之外的位置。
 
@@ -107,7 +108,7 @@ npm run pack           # scripts/package.mjs → release/<id>-<version>-windows-
 dbx-mail/
 ├─ manifest.json            # 插件清单（id / 版本 / 权限 / workbench 贡献）
 ├─ dbx-plugin.toml          # 打包配置（Rust backend + include 列表）
-├─ backend/                 # Rust Sidecar（12 个模块 + 9 个单元测试）
+├─ backend/                 # Rust Sidecar（13 个模块 + 18 个单元测试）
 ├─ src/                     # 前端
 │  ├─ lib/{bridge,rpc,demo,i18n,format,html}.ts
 │  ├─ stores/{mail,composer,ui}.ts
@@ -142,12 +143,15 @@ dbx-mail/
 
 | 内容 | 处理 |
 | --- | --- |
-| 远程图片 | 默认拦截：`src` 换成 1×1 透明 GIF + 斜纹占位框（按原始 `width`/`height` 定尺寸），点「显示图片」后经本地代理取回转 data URL；声明尺寸 ≤2px 的按跟踪像素直接隐藏 |
+| 远程图片 | 默认拦截：**挂载前**就把 `src` 换成 1×1 透明 GIF + 斜纹占位框（按原始 `width`/`height` 定尺寸），原地址存进 `data-remote`，点「显示图片」后经本地代理取回转 data URL；声明尺寸 ≤2px 的按跟踪像素直接隐藏 |
 | CSS 背景图 | `background-image: url(http…)` 与 `background="…"` 同样先拦后取 |
 | `cid:` 内嵌图 | 后端解析时已转成 data URL，不需要联网 |
 | 邮件 `<style>` | 整段抽出 → 所有选择器加 `.mail-html` 前缀（`@media` 递归）→ 去 `@import` → `position:fixed` 落回文档流 → 以 `textContent` 注入，避免邮件样式改到应用自身 |
 | 排版语义 | Tailwind preflight 会清零 `*` 的 margin、去掉列表符号、把 `h1~h6` 拉平、把 `img` 变块级；`.mail-html` 内已逐项还原 |
 | 深色模式 | 摘掉写死的 `color` / `background` / `border-color`（内联与 `<style>` 都摘），交给主题变量 |
+
+- 「显示图片」当前是**会话级**开关：点一次之后，本会话打开的其它邮件也会自动取图。
+  按邮件/按发件人的粒度留待后续版本。
 
 回归脚本（需要 demo 富格式样例，`?demo=1&rich=1`）：
 
@@ -156,7 +160,12 @@ node scripts/render-check.mjs        # 拦截态 / 放开态截图与 DOM 断言
 node scripts/render-check-dark.mjs   # 深色模式主色检查
 node scripts/render-check-scroll.mjs # 长正文可滚动、不横向裁切（?rich=2 固定 700px 模板）
 node scripts/render-check-folder.mjs # 自定义文件夹按需同步、同角色文件夹不重名
+node scripts/sanitize-check.mjs      # 注入回归：阅读器与回复引用两条路径（?evil=1）
 ```
+
+`sanitize-check` 用的是 `?demo=1&evil=1` 挂的恶意样例（`<img onerror>`、`javascript:` 链接、
+`<iframe>`、`<svg onload>`、`<script>`、`<form>`、CSS 远程 `url()`），每条载荷都会写
+`window.__dbxXss`，断言的是「标记没出现」而不是「标签被删掉」，改标签名绕不过去。
 
 ## 6.3 同步范围
 
@@ -167,5 +176,6 @@ node scripts/render-check-folder.mjs # 自定义文件夹按需同步、同角�
 
 ## 7. 许可
 
-- 本插件：GPL-3.0-or-later（见 `LICENSE`）。
-- 第三方组件与许可见 `THIRD-PARTY-NOTICES.md` 与 `licenses/`。
+- 本插件：GPL-3.0-or-later（见 `LICENSE`，FSF 标准文本，未作任何改动）。
+- 版权归属：Copyright (C) 2026 mjj3610，见 `NOTICE`。
+- 第三方组件、许可证全文与传递依赖中的非 MIT/Apache 组件见 `THIRD-PARTY-NOTICES.md` 与 `licenses/`。

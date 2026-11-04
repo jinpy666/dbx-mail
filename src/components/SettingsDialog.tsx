@@ -239,7 +239,7 @@ export function SettingsDialog() {
 
           {tab === 'about' && (
             <div style={{ display: 'grid', gap: 10, fontSize: 13 }}>
-              <Row label={t(locale, 'settings.version')} value={mail.version || '0.1.3'} />
+              <Row label={t(locale, 'settings.version')} value={mail.version || '0.1.4'} />
               <Row label={t(locale, 'settings.dataDir')} value={mail.dataDir} mono />
               <Row
                 label={t(locale, 'settings.vault')}
