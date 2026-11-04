@@ -2,11 +2,11 @@
  * 渲染验收脚本：打开 demo 界面 → 打开富格式样例邮件 → 拦截态截图 → 放开图片 → 再截图
  * 顺带校验 <style> 作用域、图片尺寸与 class，避免只看截图靠肉眼猜。
  */
-import { chromium } from 'file:///C:/Users/mark1.ma/.workbuddy/binaries/node/versions/22.22.2-6/node_modules/@playwright/cli/node_modules/playwright-core/index.mjs'
+import { chromium, executablePath } from './browser.mjs'
 import { mkdirSync } from 'node:fs'
 
-const out = 'G:/workspace/dbx-plugin/dbx-mail/screenshots'
-const exe = 'C:/Users/mark1.ma/AppData/Local/ms-playwright/chromium-1140/chrome-win/chrome.exe'
+const out = fileURLToPath(new URL('../screenshots/', import.meta.url))
+const exe = executablePath
 mkdirSync(out, { recursive: true })
 
 const browser = await chromium.launch({ executablePath: exe })

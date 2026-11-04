@@ -2,10 +2,10 @@
  * 滚动与横向裁切检查：窄窗口打开「固定 700px 宽 + body{overflow:hidden}」的营销邮件模板
  * 断言：阅读区能纵向滚动到底、正文不被左右裁掉、邮件区域自身有横向滚动兜底
  */
-import { chromium } from 'file:///C:/Users/mark1.ma/.workbuddy/binaries/node/versions/22.22.2-6/node_modules/@playwright/cli/node_modules/playwright-core/index.mjs'
+import { chromium, executablePath } from './browser.mjs'
 
-const exe = 'C:/Users/mark1.ma/AppData/Local/ms-playwright/chromium-1140/chrome-win/chrome.exe'
-const out = 'G:/workspace/dbx-plugin/dbx-mail/screenshots'
+const exe = executablePath
+const out = fileURLToPath(new URL('../screenshots/', import.meta.url))
 const browser = await chromium.launch({ executablePath: exe })
 const page = await browser.newPage({ viewport: { width: 900, height: 700 } })
 await page.goto('http://127.0.0.1:4173/index.html?demo=1&rich=2', { waitUntil: 'networkidle' })

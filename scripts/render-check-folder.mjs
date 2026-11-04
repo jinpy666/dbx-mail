@@ -3,10 +3,10 @@
  * 1) 同角色的两个文件夹（Junk / 广告邮件）在侧栏用真实名字区分，不重复成两个「垃圾邮件」
  * 2) 打开从未同步过的自定义文件夹（订阅邮件）时自动触发一次同步，并给出「同步此文件夹」入口
  */
-import { chromium } from 'file:///C:/Users/mark1.ma/.workbuddy/binaries/node/versions/22.22.2-6/node_modules/@playwright/cli/node_modules/playwright-core/index.mjs'
+import { chromium, executablePath } from './browser.mjs'
 
-const exe = 'C:/Users/mark1.ma/AppData/Local/ms-playwright/chromium-1140/chrome-win/chrome.exe'
-const out = 'G:/workspace/dbx-plugin/dbx-mail/screenshots'
+const exe = executablePath
+const out = fileURLToPath(new URL('../screenshots/', import.meta.url))
 const browser = await chromium.launch({ executablePath: exe })
 const page = await browser.newPage({ viewport: { width: 1180, height: 900 } })
 const errors = []

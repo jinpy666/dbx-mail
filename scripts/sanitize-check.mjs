@@ -12,14 +12,16 @@
  * 用法：node scripts/sanitize-check.mjs
  * 退出码：0 全部通过；1 有断言失败。
  */
-import { chromium } from 'file:///C:/Users/mark1.ma/.workbuddy/binaries/node/versions/22.22.2-6/node_modules/@playwright/cli/node_modules/playwright-core/index.mjs'
+import { chromium, executablePath } from './browser.mjs'
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { extname, join, normalize } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const ROOT = 'G:/workspace/dbx-plugin/dbx-mail/ui'
+const ROOT = fileURLToPath(new URL('../ui/', import.meta.url)).replace(/[\\/]+$/, '')
+const ROOT_POSIX = ROOT.replace(/\\/g, '/')
 const PORT = 4174
-const EXE = 'C:/Users/mark1.ma/AppData/Local/ms-playwright/chromium-1140/chrome-win/chrome.exe'
+const EXE = executablePath
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -44,8 +46,8 @@ const server = createServer(async (request, response) => {
   const pathname = decodeURIComponent((request.url ?? '/').split('?')[0])
   const relative = normalize(pathname).replace(/^([/\\])+/, '') || 'index.html'
   const file = join(ROOT, relative)
-  // Windows 下 join 返回反斜杠路径，统一成 / 再比前缀，避免误判成目录穿越
-  if (!file.replace(/\\/g, '/').startsWith(ROOT)) {
+  // Windows 下 join 返回反斜杠路径，两边统一成 / 再比前缀，避免误判成目录穿越
+  if (!file.replace(/\\/g, '/').startsWith(`${ROOT_POSIX}/`)) {
     response.writeHead(403).end('forbidden')
     return
   }

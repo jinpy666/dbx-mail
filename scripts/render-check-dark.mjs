@@ -1,9 +1,11 @@
 /**
  * 深色模式检查：走真实 UI 切主题（设置 → 深色），验证邮件正文字色跟随主题
  */
-import { chromium } from 'file:///C:/Users/mark1.ma/.workbuddy/binaries/node/versions/22.22.2-6/node_modules/@playwright/cli/node_modules/playwright-core/index.mjs'
+import { chromium, executablePath } from './browser.mjs'
+import { fileURLToPath } from 'node:url'
 
-const exe = 'C:/Users/mark1.ma/AppData/Local/ms-playwright/chromium-1140/chrome-win/chrome.exe'
+const exe = executablePath
+const out = fileURLToPath(new URL('../screenshots/', import.meta.url))
 const browser = await chromium.launch({ executablePath: exe })
 const page = await browser.newPage({ viewport: { width: 1180, height: 1000 } })
 await page.goto('http://127.0.0.1:4173/index.html?demo=1&rich=1', { waitUntil: 'networkidle' })
@@ -17,7 +19,7 @@ await page.waitForTimeout(400)
 await page.keyboard.press('Escape')
 await page.waitForTimeout(700)
 
-await page.screenshot({ path: 'G:/workspace/dbx-plugin/dbx-mail/screenshots/rich-dark.png' })
+await page.screenshot({ path: `${out}/rich-dark.png` })
 const colors = await page.evaluate(() => {
   const mail = document.querySelector('.mail-html')
   const heading = document.querySelector('.mail-html h1')

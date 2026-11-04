@@ -176,6 +176,15 @@ node scripts/sanitize-check.mjs      # 注入回归：阅读器与回复引用�
 `<iframe>`、`<svg onload>`、`<script>`、`<form>`、CSS 远程 `url()`），每条载荷都会写
 `window.__dbxXss`，断言的是「标记没出现」而不是「标签被删掉」，改标签名绕不过去。
 
+这些脚本通过 `scripts/browser.mjs` 解析 playwright 与 Chromium，不再写死本机路径。
+自动探测失败时用环境变量指定：
+
+```bash
+PLAYWRIGHT_CORE=/path/to/playwright-core/index.mjs \
+CHROMIUM_PATH=/path/to/chrome \
+node scripts/sanitize-check.mjs
+```
+
 ## 6.3 同步范围
 
 - 默认 `primary`：只同步收件箱 / 已发送 / 草稿 / 存档；自定义文件夹（如「12306」「通行费」）不进同步队列。
