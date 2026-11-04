@@ -1,0 +1,17 @@
+DBX 邮件（DBX Mail）—— DBX 插件 com.mjj3610.mail
+Copyright (C) 2026 mjj3610
+
+本程序是自由软件：你可以依据自由软件基金会发布的 GNU 通用公共许可证第 3 版
+（或你选择的任何更高版本）的条款再分发和/或修改它。
+
+本程序按「希望它有用」的目的分发，但不提供任何担保，也不提供可销售性或
+适用于特定用途的默示担保。详见 GNU 通用公共许可证。
+
+许可证全文见本目录下的 LICENSE（逐字副本另见 licenses/GPL-3.0.txt）。
+许可证正文不得修改；版权归属与联系信息以本文件为准。
+
+第三方组件、其许可证与全文副本见 THIRD-PARTY-NOTICES.md 与 licenses/。
+界面与信息架构的参考项目（Penguin Mail 1.0.11）说明见 THIRD-PARTY-NOTICES.md
+的「设计与产品参考」一节；本插件未复制其源代码，也不包含其二进制产物。
+
+源代码：https://github.com/mjj3610/dbx-mail

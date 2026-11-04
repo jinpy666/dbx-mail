@@ -9,8 +9,8 @@ directory = "backend"
 binary = "backend"
 
 [package]
-# LICENSE / THIRD-PARTY-NOTICES.md / licenses/ 随包分发
-include = ["assets", "ui", "LICENSE", "THIRD-PARTY-NOTICES.md", "licenses"]
+# LICENSE / NOTICE / THIRD-PARTY-NOTICES.md / licenses/ 随包分发
+include = ["assets", "ui", "LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md", "licenses"]
 
 [dev]
 # Windows 下 CLI 以 \\?\ 前缀路径作为 cwd 调用构建命令，CMD 不支持该路径，
