@@ -1,0 +1,62 @@
+# 发布带原生 Sidecar 的 DBX 插件：由 CI 在 5 个平台各构建一次，并把未签名产物挂到 Release。
+#
+# 为什么必须走 CI：`dbx-plugin package` 拒绝跨平台打包
+# （`Native plugin target 'linux-x64' does not match build host 'windows-x64'`），
+# 而 Sidecar 是预编译的 Rust 二进制，本地只可能产出当前平台的包。
+#
+# 触发条件只能是「Publish release」（draft 不触发 release: published）。
+name: Plugin release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 已存在的 Release tag（产物会 clobber 同名资产）
+        required: true
+
+concurrency:
+  group: plugin-release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    # publish 阶段要 gh release upload，复用工作流内部已声明 contents: write，
+    # 但调用方也必须显式放行，否则 token 拿不到写权限。
+    permissions:
+      contents: write
+    uses: t8y2/dbx/.github/workflows/plugin-release-reusable.yml@main
+    with:
+      release-tag: ${{ github.event.release.tag_name || inputs.tag }}
+      # 自己打包：官方 CLI 在 Windows 上会以 `\\?\` 前缀路径调 cargo（GNU 工具链的 ld 处理不了），
+      # 因此 scripts/package.mjs 自行按 CLI 的产物格式写 zip + checksums.json + artifact.json。
+      package-command: |
+        set -euo pipefail
+        if [ "$(uname -s)" = "Linux" ]; then
+          # keyring 的 sync-secret-service 后端要链接 libdbus
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+        fi
+        npm ci --no-audit --no-fund
+        npm run build
+        # backend/rust-toolchain.toml 固定了 windows-gnu（本机 link.exe 被 Git 的 link 抢占），
+        # CI 里必须用宿主原生工具链，否则会去装一个对当前宿主非法的 toolchain。
+        export RUSTUP_TOOLCHAIN=stable
+        ( cd backend && cargo build --release --locked )
+        node scripts/package.mjs --output-dir dist
+      package-path: dist/*.dbxp
+      metadata-path: dist/*.artifact.json
+      # 不装官方 CLI（打包由本地脚本完成），也不装 Go。
+      install-plugin-cli: false
+      install-plugin-cli-from-source: false
+      go-version: ''
+      rust-toolchain: stable
+      build-matrix: >-
+        {"include":[
+        {"runner":"ubuntu-24.04","target":"linux-x64"},
+        {"runner":"ubuntu-24.04-arm","target":"linux-arm64"},
+        {"runner":"windows-2022","target":"windows-x64"},
+        {"runner":"macos-15-intel","target":"darwin-x64"},
+        {"runner":"macos-15","target":"darwin-arm64"}
+        ]}

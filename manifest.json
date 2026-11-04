@@ -3,7 +3,7 @@
   "manifest_version": 1,
   "id": "com.mjj3610.mail",
   "name": "DBX Mail",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "mjj3610",
   "description": "Local-first mail workbench: multiple IMAP accounts, cached conversations, a rich composer, offline outbox and attachments kept on disk.",
   "icon": "assets/plugin.svg",

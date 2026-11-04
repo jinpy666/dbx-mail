@@ -43,11 +43,12 @@ const outputDir = resolve(root, arg('output-dir', 'release'))
 
 function platformTarget() {
   const key = `${process.platform}-${process.arch}`
+  // 目标名必须与宿主 / 商店 / CI 矩阵一致：darwin-*、linux-*、windows-*
   const map = {
     'win32-x64': 'windows-x64',
     'win32-arm64': 'windows-arm64',
-    'darwin-x64': 'macos-x64',
-    'darwin-arm64': 'macos-arm64',
+    'darwin-x64': 'darwin-x64',
+    'darwin-arm64': 'darwin-arm64',
     'linux-x64': 'linux-x64',
     'linux-arm64': 'linux-arm64',
   }

@@ -1,6 +1,6 @@
 [package]
 name = "dbx-mail-backend"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 rust-version = "1.88"
 description = "DBX 邮件插件原生 Sidecar：IMAP 同步、SMTP 投递、SQLite 缓存与附件文件读写"

@@ -10,8 +10,10 @@
 
 ## 0. 安装
 
-从 [Releases](https://github.com/mjj3610/dbx-mail/releases) 下载 `com.mjj3610.mail-<版本>-windows-x64.dbxp`，
-或在 DBX 的插件商店里搜索「邮件 / DBX Mail」。当前版本 **0.1.4**（Windows x64，未签名包）。
+从 [Releases](https://github.com/mjj3610/dbx-mail/releases) 下载对应平台的
+`com.mjj3610.mail-<版本>-<平台>.dbxp`（`windows-x64` / `linux-x64` / `linux-arm64` / `darwin-x64` / `darwin-arm64`，
+由 CI 在各自原生 runner 上构建），或在 DBX 的插件商店里搜索「邮件 / DBX Mail」。
+当前版本 **0.1.5**（五平台未签名包）。
 
 ![三栏工作台](screenshots/01-inbox.png)
 
@@ -90,8 +92,15 @@ npm install
 npm run build          # vite → ui/（单文件 bundle，不可拆包）
 npm run backend        # cargo build --release → backend/target/release/backend[.exe]
 npm run sidecar-check  # 15 项协议冒烟测试（握手 / 设置 / 目录 / 列表 / 错误码）
-npm run pack           # scripts/package.mjs → release/<id>-<version>-windows-x64.dbxp
+npm run pack           # scripts/package.mjs → release/<id>-<version>-<当前平台>.dbxp（本地只能打当前平台）
 ```
+
+**多平台包由 CI 产出**：`.github/workflows/plugin-release.yml` 调用
+`t8y2/dbx` 的复用工作流，在 `ubuntu-24.04` / `ubuntu-24.04-arm` / `windows-2022` /
+`macos-15-intel` / `macos-15` 上各构建一次，产物挂到对应 Release。
+发版流程：改版本号 → 打 tag → **Publish release**（draft 不触发 `release: published`）→
+等 5 个 job 绿 → 下载 `release-candidates.json` 生成商店候选。
+带原生 Sidecar 的插件无法产出 universal 包，官方 CLI 会直接拒绝跨平台打包。
 
 - `backend/rust-toolchain.toml` 固定 `stable-x86_64-pc-windows-gnu`：本机没有 MSVC Build Tools，
   默认 MSVC 工具链的 `link.exe` 又常被 Git 自带的 `link` 抢占。
