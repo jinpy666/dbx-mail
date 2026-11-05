@@ -385,6 +385,30 @@ fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult {
             Ok(accounts::discover(Arc::clone(app), id)?)
         }
 
+        // OAuth 授权（Microsoft 365 / Outlook.com）
+        "account/oauthBegin" => {
+            let tenant = param_str(params, "tenantId");
+            let client = param_str(params, "clientId");
+            if client.trim().is_empty() {
+                return Err(RpcError::invalid("请填写 Azure 应用的 Client ID"));
+            }
+            let app = Arc::clone(app);
+            let (url, state) = app
+                .rt
+                .block_on(oauth::begin(&app, &tenant, &client))
+                .map_err(RpcError::internal)?;
+            Ok(json!({ "authorizeUrl": url, "state": state, "expiresIn": 300 }))
+        }
+        "account/oauthStatus" => {
+            let state = param_str(params, "state");
+            oauth::status(app, &state).map_err(RpcError::internal)
+        }
+        "account/oauthCancel" => {
+            let state = param_str(params, "state");
+            oauth::cancel(app, &state);
+            Ok(json!({ "ok": true }))
+        }
+
         // 文件夹
         "mailbox/list" => {
             let conn = app.db();

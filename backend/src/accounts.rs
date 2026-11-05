@@ -33,6 +33,25 @@ pub fn presets() -> Vec<ProviderPreset> {
             hint: "需要在 Google 账号中开启两步验证并生成「应用专用密码」".into(),
         },
         ProviderPreset {
+            key: "msgraph".into(),
+            label: "Microsoft 365 / Outlook.com（Graph）".into(),
+            provider: "graph".into(),
+            domains: vec![
+                "outlook.com".into(),
+                "hotmail.com".into(),
+                "live.com".into(),
+                "microsoft.com".into(),
+                "office365.com".into(),
+            ],
+            imap_host: "".into(),
+            imap_port: 0,
+            imap_security: "tls".into(),
+            smtp_host: "".into(),
+            smtp_port: 0,
+            smtp_security: "tls".into(),
+            hint: "需要先在 Azure Portal 注册应用并填入 Client ID，然后在浏览器中完成授权（企业租户可能需要管理员同意）".into(),
+        },
+        ProviderPreset {
             key: "outlook".into(),
             label: "Outlook / Microsoft 365".into(),
             provider: "imap".into(),
@@ -43,7 +62,7 @@ pub fn presets() -> Vec<ProviderPreset> {
             smtp_host: "smtp.office365.com".into(),
             smtp_port: 587,
             smtp_security: "starttls".into(),
-            hint: "企业租户可能关闭了 IMAP，或要求使用 OAuth2 / 应用密码".into(),
+            hint: "微软已停用基本认证，此预设仅适用于少数仍开启密码登录的场景；推荐改用 Microsoft 365（Graph）预设".into(),
         },
         ProviderPreset {
             key: "qq".into(),
@@ -258,13 +277,43 @@ fn normalize_security(value: &str) -> String {
     }
 }
 
-/// 新增账户：校验 → 保存密码 → 写库 → 尝试发现文件夹
+/// 新增账户：校验 → 保存密码/授权凭据 → 写库 → 尝试发现文件夹
 pub fn add(app: Arc<App>, params: &Value) -> Result<Value, String> {
     let account = account_from_params(params, 0)?;
-    let password = crate::param_str(params, "password");
-    if password.trim().is_empty() {
-        return Err("请填写邮箱密码或授权码".into());
-    }
+    // Graph 账户：凭据是 OAuth refresh_token（从 pending 会话认领）
+    let credential = if account.provider == "graph" {
+        if account.client_id.trim().is_empty() {
+            return Err("请填写 Azure 应用的 Client ID".into());
+        }
+        if account.tenant_id.trim().is_empty() {
+            return Err("请填写租户 ID（不确定时填 common）".into());
+        }
+        let state = crate::param_str(params, "oauthState");
+        if state.is_empty() {
+            return Err("请先完成浏览器授权".into());
+        }
+        let status = crate::oauth::status(&app, &state)?;
+        match status.get("status").and_then(Value::as_str) {
+            Some("done") => status
+                .get("refreshToken")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            Some("failed") => {
+                return Err(format!(
+                    "授权失败：{}",
+                    status.get("error").and_then(Value::as_str).unwrap_or("未知错误")
+                ))
+            }
+            _ => return Err("授权尚未完成或已过期，请重新开始授权".into()),
+        }
+    } else {
+        let password = crate::param_str(params, "password");
+        if password.trim().is_empty() {
+            return Err("请填写邮箱密码或授权码".into());
+        }
+        password
+    };
 
     {
         let conn = app.db();
@@ -276,17 +325,22 @@ pub fn add(app: Arc<App>, params: &Value) -> Result<Value, String> {
         }
     }
 
-    if params.get("verify").and_then(Value::as_bool).unwrap_or(true) {
+    if account.provider != "graph" && params.get("verify").and_then(Value::as_bool).unwrap_or(true) {
         app.rt
-            .block_on(sync::test_account(&account, &password))
+            .block_on(sync::test_account(&account, &credential))
             .map_err(|error| format!("连接检测失败：{error}"))?;
     }
+    // Graph 账户的验证即授权本身（refresh_token 已到手），无需额外探测
 
-    let reference = format!("mail:{}", account.email);
+    let reference = if account.provider == "graph" {
+        format!("oauth2:{}", account.email)
+    } else {
+        format!("mail:{}", account.email)
+    };
     let vault = app
         .secrets
-        .save(&reference, &password)
-        .map_err(|error| format!("保存密码失败：{error}"))?;
+        .save(&reference, &credential)
+        .map_err(|error| if account.provider == "graph" { format!("保存授权凭据失败：{error}") } else { format!("保存密码失败：{error}") })?;
 
     let mut account = account;
     let color = {
@@ -336,7 +390,33 @@ pub fn update(app: Arc<App>, params: &Value) -> Result<Value, String> {
         if !params.get("signature").is_some() {
             account.signature = existing.signature;
         }
-        db::account_update(&conn, &account).map_err(|error| format!("保存账户失败：{error}"))?;
+    db::account_update(&conn, &account).map_err(|error| format!("保存账户失败：{error}"))?;
+    }
+    if account.provider == "graph" {
+        // Graph 账户：重新授权（oauthState 认领新 refresh_token）或仅更新 tenant/clientId
+        let state = crate::param_str(params, "oauthState");
+        if !state.is_empty() {
+            let status = crate::oauth::status(&app, &state)?;
+            let refresh = match status.get("status").and_then(Value::as_str) {
+                Some("done") => status
+                    .get("refreshToken")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                Some("failed") => {
+                    return Err(format!(
+                        "授权失败：{}",
+                        status.get("error").and_then(Value::as_str).unwrap_or("未知错误")
+                    ))
+                }
+                _ => return Err("授权尚未完成或已过期，请重新开始授权".into()),
+            };
+            let reference = format!("oauth2:{}", account.email);
+            app.secrets
+                .save(&reference, &refresh)
+                .map_err(|error| format!("保存授权凭据失败：{error}"))?;
+        }
+        return Ok(json!({ "account": account }));
     }
     let password = crate::param_str(params, "password");
     if !password.trim().is_empty() {
@@ -358,6 +438,7 @@ pub fn remove(app: Arc<App>, params: &Value) -> Result<Value, String> {
             .ok_or_else(|| "账户不存在".to_string())?
     };
     app.secrets.delete(&format!("mail:{}", account.email));
+    app.secrets.delete(&format!("oauth2:{}", account.email));
     {
         let conn = app.db();
         db::account_delete(&conn, id).map_err(|error| format!("删除账户失败：{error}"))?;
@@ -369,6 +450,12 @@ pub fn remove(app: Arc<App>, params: &Value) -> Result<Value, String> {
 /// 连接检测（不写库）
 pub fn test(app: Arc<App>, params: &Value) -> Result<Value, String> {
     let account = account_from_params(params, 0)?;
+    if account.provider == "graph" {
+        // Graph 账户用已保存的授权凭据验证（向导流程里授权本身即是验证）
+        let lines = sync::test_account_graph(Arc::clone(&app), &account)
+            .map_err(|error| format!("连接失败：{error}"))?;
+        return Ok(json!({ "ok": true, "lines": lines }));
+    }
     let password = crate::param_str(params, "password");
     if password.trim().is_empty() {
         return Err("请填写密码或授权码".into());
@@ -388,6 +475,11 @@ pub fn discover(app: Arc<App>, account_id: i64) -> Result<Value, String> {
             .map_err(|error| format!("读取账户失败：{error}"))?
             .ok_or_else(|| "账户不存在".to_string())?
     };
+    if account.provider == "graph" {
+        sync::graph_discover(Arc::clone(&app), &account)
+            .map_err(|error| format!("文件夹发现失败：{error}"))?;
+        return Ok(json!({ "ok": true }));
+    }
     let password = app.load_password(account_id)?;
     let login = Login {
         host: account.imap_host.clone(),

@@ -9,7 +9,9 @@
 
 use std::time::Duration;
 
+use base64::Engine;
 use serde_json::{json, Value};
+use sha2::Digest;
 
 use crate::oauth;
 
@@ -43,6 +45,8 @@ pub struct GraphMessage {
 pub struct GraphFolder {
     pub id: String,
     pub display_name: String,
+    /// wellKnownFolderName（inbox / sentitems / drafts / deleteditems / junkemail / archive…）
+    pub well_known: String,
     pub total: i64,
     pub unread: i64,
 }
@@ -130,6 +134,12 @@ impl GraphClient {
         self.get_json(&format!("{}/v1.0/me", self.base)).await
     }
 
+    /// 单个文件夹（同步后刷新计数用）
+    pub async fn folder(&self, folder_id: &str) -> Result<GraphFolder, String> {
+        let value = self.get_json(&format!("{}/v1.0/me/mailFolders/{folder_id}", self.base)).await?;
+        folder_from(&value).ok_or_else(|| "文件夹响应缺少 id".to_string())
+    }
+
     /// 全部可见文件夹（含子文件夹，深度 ≤3）
     pub async fn folders(&self) -> Result<Vec<GraphFolder>, String> {
         let mut result = Vec::new();
@@ -193,7 +203,28 @@ impl GraphClient {
         self.delta_page(&url).await
     }
 
-    async fn delta_page(&self, url: &str) -> Result<DeltaPage, String> {
+    /// 最新 N 封（首次同步用；delta 接口不支持按时间排序）
+    pub async fn recent_messages(&self, folder_id: &str, limit: usize) -> Result<Vec<GraphMessage>, String> {
+        let mut result = Vec::new();
+        let mut url = format!(
+            "{}/v1.0/me/mailFolders/{folder_id}/messages?$top={}&$orderBy=receivedDateTime desc&$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,flag,hasAttachments,bodyPreview",
+            self.base,
+            limit.clamp(1, 1000)
+        );
+        loop {
+            let page = self.get_json(&url).await?;
+            for item in page.get("value").and_then(Value::as_array).into_iter().flatten() {
+                result.push(parse_delta_message(item));
+            }
+            match page.get("@odata.nextLink").and_then(Value::as_str) {
+                Some(next) => url = next.to_string(),
+                None => break,
+            }
+        }
+        Ok(result)
+    }
+
+    pub async fn delta_page(&self, url: &str) -> Result<DeltaPage, String> {
         let value = self.get_json(url).await?;
         Ok(parse_delta(&value))
     }
@@ -400,9 +431,19 @@ fn folder_from(item: &Value) -> Option<GraphFolder> {
     Some(GraphFolder {
         id,
         display_name: item.get("displayName").and_then(Value::as_str).unwrap_or("").to_string(),
+        well_known: item.get("wellKnownFolderName").and_then(Value::as_str).unwrap_or("").to_string(),
         total: item.get("totalItemCount").and_then(Value::as_i64).unwrap_or(0),
         unread: item.get("unreadItemCount").and_then(Value::as_i64).unwrap_or(0),
     })
+}
+
+/// raw 文件键：Graph id 很长且含路径敏感字符，取 SHA-256 前缀保证可安全作文件名
+pub fn raw_key(remote_id: &str) -> String {
+    let digest = sha2::Sha256::digest(remote_id.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(&digest[..12])
+        .replace('-', "a")
+        .replace('_', "b")
 }
 
 /// Graph wellKnownFolderName / 显示名 → 本地 role

@@ -527,20 +527,6 @@ pub fn mailbox_remote_id(conn: &Connection, id: i64) -> rusqlite::Result<String>
     .map(|value| value.unwrap_or_default())
 }
 
-/// 按 Graph folder id 查本地文件夹
-pub fn mailbox_by_remote(
-    conn: &Connection,
-    account_id: i64,
-    remote_id: &str,
-) -> rusqlite::Result<Option<i64>> {
-    conn.query_row(
-        "SELECT id FROM mailboxes WHERE account_id = ?1 AND remote_id = ?2",
-        params![account_id, remote_id],
-        |row| row.get(0),
-    )
-    .optional()
-}
-
 /// 读取 delta 增量游标
 pub fn mailbox_delta_link(conn: &Connection, id: i64) -> rusqlite::Result<String> {
     conn.query_row(
@@ -1658,8 +1644,6 @@ PRAGMA user_version = 1;
         let account_id = insert_account(&conn, "graph");
         let mailbox_id = mailbox_upsert(&conn, account_id, "收件箱", "/", "inbox", true, 0, "folder-1").unwrap();
         assert_eq!(mailbox_remote_id(&conn, mailbox_id).unwrap(), "folder-1");
-        assert_eq!(mailbox_by_remote(&conn, account_id, "folder-1").unwrap(), Some(mailbox_id));
-        assert_eq!(mailbox_by_remote(&conn, account_id, "missing").unwrap(), None);
 
         // IMAP 路径传空 remote_id 时不覆盖已存值
         mailbox_upsert(&conn, account_id, "收件箱", "/", "inbox", true, 0, "").unwrap();
