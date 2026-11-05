@@ -14,6 +14,12 @@ export interface Account {
   email: string
   displayName: string
   username: string
+  /** imap / graph（graph = Microsoft 365 / Outlook.com，走 Graph API） */
+  provider: 'imap' | 'graph'
+  /** password / oauth2 */
+  authType: string
+  tenantId: string
+  clientId: string
   imapHost: string
   imapPort: number
   imapSecurity: string
@@ -174,6 +180,8 @@ export interface ProviderPreset {
   key: string
   label: string
   domains: string[]
+  /** imap / graph；graph 预设不含服务器字段，走 OAuth 授权 */
+  provider: 'imap' | 'graph'
   imapHost: string
   imapPort: number
   imapSecurity: string
@@ -305,6 +313,31 @@ export function accountTest(payload: Record<string, unknown>): Promise<{ ok: boo
 
 export function accountDiscover(id: number): Promise<{ mailboxes: Mailbox[] }> {
   return call('account/discover', { id }, NETWORK_TIMEOUT)
+}
+
+export interface OauthBegin {
+  authorizeUrl: string
+  state: string
+  expiresIn: number
+}
+
+export type OauthStatus =
+  | { status: 'pending' }
+  | { status: 'done'; refreshToken: string }
+  | { status: 'failed'; error: string }
+  | { status: 'expired' }
+
+/** 发起 OAuth 授权：返回浏览器授权 URL（回环回调由 sidecar 接收） */
+export function oauthBegin(tenantId: string, clientId: string): Promise<OauthBegin> {
+  return call('account/oauthBegin', { tenantId, clientId }, NETWORK_TIMEOUT)
+}
+
+export function oauthStatus(state: string): Promise<OauthStatus> {
+  return call('account/oauthStatus', { state })
+}
+
+export function oauthCancel(state: string): Promise<{ ok: boolean }> {
+  return call('account/oauthCancel', { state })
 }
 
 /* ---------------- 同步 ---------------- */
