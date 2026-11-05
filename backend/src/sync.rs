@@ -1078,7 +1078,12 @@ async fn graph_sync_mailbox(
     };
 
     let mut page = client.delta_first(&remote_id, if baseline { None } else { Some(delta_link.as_str()) }).await?;
+    let mut pages = 0usize;
     loop {
+        pages += 1;
+        if pages > 1000 {
+            return Err("delta 翻页超过上限，已中止".into());
+        }
         for message in &page.messages {
             if message.id.is_empty() {
                 continue;

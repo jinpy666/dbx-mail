@@ -317,7 +317,7 @@ pub async fn begin(app: &Arc<App>, tenant_id: &str, client_id: &str) -> Result<(
     Ok((url, state))
 }
 
-/// 查询授权进度；done 返回 refresh_token 并移除记录
+/// 查询授权进度（只读，不消费结果；认领走 `claim`）
 pub fn status(app: &Arc<App>, state: &str) -> Result<serde_json::Value, String> {
     let mut map = app.oauth_pending.lock().unwrap_or_else(|error| error.into_inner());
     let now = crate::now_ms();
@@ -327,16 +327,23 @@ pub fn status(app: &Arc<App>, state: &str) -> Result<serde_json::Value, String> 
     };
     match &pending.result {
         None => Ok(serde_json::json!({ "status": "pending" })),
-        Some(Err(error)) => {
-            let message = error.clone();
-            map.remove(state);
-            Ok(serde_json::json!({ "status": "failed", "error": message }))
-        }
-        Some(Ok(refresh_token)) => {
-            let token = refresh_token.clone();
-            map.remove(state);
-            Ok(serde_json::json!({ "status": "done", "refreshToken": token }))
-        }
+        Some(Err(error)) => Ok(serde_json::json!({ "status": "failed", "error": error })),
+        Some(Ok(refresh_token)) => Ok(serde_json::json!({ "status": "done", "refreshToken": refresh_token })),
+    }
+}
+
+/// 认领授权结果：取走 refresh_token 并移除会话（account/add、account/update 用）
+pub fn claim(app: &Arc<App>, state: &str) -> Result<String, String> {
+    let mut map = app.oauth_pending.lock().unwrap_or_else(|error| error.into_inner());
+    let now = crate::now_ms();
+    map.retain(|_, pending| now - pending.created_at < PENDING_TTL_MS);
+    match map.remove(state) {
+        Some(pending) => match pending.result {
+            Some(Ok(refresh_token)) => Ok(refresh_token),
+            Some(Err(error)) => Err(format!("授权失败：{error}")),
+            None => Err("授权尚未完成，请等待浏览器授权结束".into()),
+        },
+        None => Err("授权会话已过期，请重新开始授权".into()),
     }
 }
 

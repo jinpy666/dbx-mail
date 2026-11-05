@@ -165,7 +165,9 @@ pub fn account_from_params(params: &Value, id: i64) -> Result<Account, String> {
     let mut imap_host = crate::param_str(params, "imapHost").trim().to_string();
     let mut smtp_host = crate::param_str(params, "smtpHost").trim().to_string();
     let preset = preset_for(&email);
-    if (imap_host.is_empty() || smtp_host.is_empty()) && preset.is_none() {
+    // Graph 账户不走 IMAP/SMTP，无需服务器地址（后续会填占位常量）
+    let provider_param = crate::param_str(params, "provider");
+    if provider_param != "graph" && (imap_host.is_empty() || smtp_host.is_empty()) && preset.is_none() {
         return Err("请填写 IMAP 与 SMTP 服务器地址".into());
     }
     if let Some(preset) = &preset {
@@ -177,11 +179,13 @@ pub fn account_from_params(params: &Value, id: i64) -> Result<Account, String> {
         }
     }
     let provider = {
-        let value = crate::param_str(params, "provider");
-        if value.is_empty() {
+        // 显式 provider 参数优先（Graph 向导不依赖域名预设匹配）
+        if provider_param == "graph" || provider_param == "imap" {
+            provider_param
+        } else if provider_param.is_empty() {
             preset.as_ref().map(|item| item.provider.clone()).unwrap_or_else(|| "imap".into())
         } else {
-            value
+            provider_param
         }
     };
     let tenant_id = crate::param_str(params, "tenantId").trim().to_string();
@@ -292,21 +296,8 @@ pub fn add(app: Arc<App>, params: &Value) -> Result<Value, String> {
         if state.is_empty() {
             return Err("请先完成浏览器授权".into());
         }
-        let status = crate::oauth::status(&app, &state)?;
-        match status.get("status").and_then(Value::as_str) {
-            Some("done") => status
-                .get("refreshToken")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            Some("failed") => {
-                return Err(format!(
-                    "授权失败：{}",
-                    status.get("error").and_then(Value::as_str).unwrap_or("未知错误")
-                ))
-            }
-            _ => return Err("授权尚未完成或已过期，请重新开始授权".into()),
-        }
+        let refresh_token = crate::oauth::claim(&app, &state)?;
+        refresh_token
     } else {
         let password = crate::param_str(params, "password");
         if password.trim().is_empty() {
@@ -396,21 +387,7 @@ pub fn update(app: Arc<App>, params: &Value) -> Result<Value, String> {
         // Graph 账户：重新授权（oauthState 认领新 refresh_token）或仅更新 tenant/clientId
         let state = crate::param_str(params, "oauthState");
         if !state.is_empty() {
-            let status = crate::oauth::status(&app, &state)?;
-            let refresh = match status.get("status").and_then(Value::as_str) {
-                Some("done") => status
-                    .get("refreshToken")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                Some("failed") => {
-                    return Err(format!(
-                        "授权失败：{}",
-                        status.get("error").and_then(Value::as_str).unwrap_or("未知错误")
-                    ))
-                }
-                _ => return Err("授权尚未完成或已过期，请重新开始授权".into()),
-            };
+            let refresh = crate::oauth::claim(&app, &state)?;
             let reference = format!("oauth2:{}", account.email);
             app.secrets
                 .save(&reference, &refresh)
