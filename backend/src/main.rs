@@ -12,16 +12,19 @@ mod accounts;
 mod compose;
 mod db;
 mod files;
+mod graph;
 mod imap;
 mod mime;
 mod model;
 mod net_guard;
+mod oauth;
 mod secrets;
 mod smtp;
 mod stream;
 mod sync;
 mod tls;
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -55,6 +58,10 @@ pub struct App {
     pub rt: tokio::runtime::Runtime,
     /// 正在同步的账户，避免重入
     pub syncing: Mutex<HashSet<i64>>,
+    /// Graph 账户的 access_token 缓存（不落盘）
+    pub token_cache: oauth::TokenCache,
+    /// 进行中的 OAuth 授权（state → 上下文）
+    pub oauth_pending: oauth::PendingMap,
 }
 
 impl App {
@@ -175,6 +182,8 @@ fn main() {
         secrets,
         rt: runtime,
         syncing: Mutex::new(HashSet::new()),
+        token_cache: Mutex::new(HashMap::new()),
+        oauth_pending: Mutex::new(HashMap::new()),
     });
 
     start_workers(app.clone());
