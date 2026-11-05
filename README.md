@@ -21,9 +21,9 @@
 
 | 模块 | 能力 |
 | --- | --- |
-| 账户 | IMAP/SMTP 多账户；8 种服务商预设（Gmail / Outlook / QQ / 腾讯企业邮 / 163 / 阿里云 / iCloud / Yahoo）按域名自动填服务器；手动改 host/port/加密方式；添加前测试连接；文件夹发现 |
+| 账户 | IMAP/SMTP 多账户；8 种服务商预设（Gmail / Outlook / QQ / 腾讯企业邮 / 163 / 阿里云 / iCloud / Yahoo）按域名自动填服务器；手动改 host/port/加密方式；添加前测试连接；文件夹发现；**Microsoft 365 / Outlook.com 走 Graph API**（见下节） |
 | 密码 | 系统凭据库（Windows Credential Manager / macOS Keychain / Secret Service）；不可用时退化为 AES-256-GCM 本地加密文件（`secrets.key` + `secrets.bin`，Unix 0600） |
-| 同步 | IMAP 增量同步：`UIDVALIDITY` 变化时重置文件夹、按 `last_uid` 拉新头、旗标双向同步（`pending_flags` 表避免服务器覆盖本地改动）；同步范围可选「主要文件夹 / 全部」；启动 45 秒巡检、可手动同步、可关自动同步 |
+| 同步 | IMAP 增量同步：`UIDVALIDITY` 变化时重置文件夹、按 `last_uid` 拉新头、旗标双向同步（`pending_flags` 表避免服务器覆盖本地改动）；Graph 账户按 `deltaLink` 增量、旗标/移动/删除直推；同步范围可选「主要文件夹 / 全部」；启动 45 秒巡检、可手动同步、可关自动同步 |
 | 会话列表 | 按 `References`/`In-Reply-To`/`Message-ID` 归并会话，会话内计数与未读聚合；过滤（全部 / 未读 / 星标 / 附件）；跨账户「所有收件箱」；搜索主题、摘要、发件人、收件人与正文全文；分页加载 |
 | 阅读器 | 会话内多封邮件折叠展开；正文由 `mail-parser` 解析后本地渲染；HTML 先经 DOMPurify 白名单清洗；**远程图片默认不加载**——挂载前就把 `src` 换成占位，不会自动向图床发起任何请求；用户点「显示图片」后由本地后端代理取回并转 data URL（SSRF 白名单 + 逐跳重定向复核，拒绝环回、内网与 CGNAT） |
 | 附件 | 解析 `mail-parser` 的部件索引，按需从原始邮件取字节；保存时自绘目录选择器选目录、同名自动加序号不覆盖；25 MB 单文件上限（`mail/part` 30 MB） |
@@ -37,6 +37,29 @@
 
 ![阅读器](screenshots/02-reader.png)
 
+## 1.1 Microsoft 365 / Outlook.com（Graph API）
+
+微软已对 Microsoft 365 与 Outlook.com 停用 IMAP/SMTP 基本认证，纯密码登录不可用。
+此场景走 **Microsoft Graph REST**（与 IMAP 账户共用同一份本地缓存，会话、搜索、
+阅读、附件、草稿、发件箱体验一致）：
+
+- **授权**：OAuth2 授权码 + PKCE，sidecar 在 `127.0.0.1` 随机端口接收回调；
+  refresh_token 存系统凭据库（同密码通道），access_token 只驻内存并到期自动刷新。
+- **自备 Azure 应用**：授权使用你自己在 Azure Portal 注册的应用（公共客户端，无 secret）：
+
+  1. 登录 [portal.azure.com](https://portal.azure.com) → Microsoft Entra ID → 应用注册 → 新注册；
+  2. 受支持账户类型选「任何组织目录中的账户和个人 Microsoft 账户」；
+  3. 重定向 URI：平台选「移动和桌面应用程序」，填 `http://localhost`（不带端口）；
+  4. API 权限 → Microsoft Graph → 委托权限：`offline_access`、`Mail.ReadWrite`、`Mail.Send`、`User.Read`；
+     受限租户可能需要管理员同意；
+  5. 把「应用程序(客户端) ID」填入插件向导，租户填 `common`（或组织租户 GUID），点「授权并添加」。
+
+- **同步**：文件夹 `wellKnownFolderName` 映射本地角色；邮件取完整 MIME
+  （`/messages/{id}/$value`）复用同一解析管线；增量用 `messages/delta`，
+  deltaLink 断链自动重建。
+- **发送**：MIME 建草稿 + send，保留 `Message-ID` / `References` / `In-Reply-To`
+  线程头，发送后自动落「已发送」；超大附件（>4MB）自动回退 JSON + 上传会话分片。
+
 ## 2. 架构
 
 ```
@@ -49,6 +72,8 @@
 │ main.rs     逐行读 JSON-RPC，握手 plugin/initialize，分发 30 余个方法               │
 │ accounts.rs 服务商预设、账户增删改查、连接测试、文件夹发现                          │
 │ imap.rs     async-imap + rustls（SSL/TLS 与 STARTTLS），UTF-7 文件夹名编解码         │
+│ oauth.rs    OAuth2 授权码 + PKCE、127.0.0.1 回环回调、token 刷新与轮换回存           │
+│ graph.rs    Microsoft Graph REST：folders/delta/$value/flags/move/MIME 发送          │
 │ smtp.rs     lettre（SSL/TLS / STARTTLS / 明文），mail-builder 组装 MIME             │
 │ mime.rs     mail-parser 解析、cid: 内联图转 data URL、附件与正文抽取、会话 key       │
 │ sync.rs     增量同步、旗标双向、按需取正文、移动/删除、SMTP 投递 + APPEND 已发送     │
@@ -91,7 +116,7 @@ MSVC 的 `link.exe` 常被 Git 的 `link` 抢占）、`cargo` 走镜像（`backe
 npm install
 npm run build          # vite → ui/（单文件 bundle，不可拆包）
 npm run backend        # cargo build --release → backend/target/release/backend[.exe]
-npm run sidecar-check  # 15 项协议冒烟测试（握手 / 设置 / 目录 / 列表 / 错误码）
+npm run sidecar-check  # 42 项协议冒烟（握手 / 设置 / 目录 / 列表 / 错误码 / Graph 全链路，需 debug 构建）
 npm run pack           # scripts/package.mjs → release/<id>-<version>-<当前平台>.dbxp（本地只能打当前平台）
 ```
 
@@ -131,7 +156,7 @@ dbx-mail/
 
 ## 6. 已知限制
 
-- 只支持 IMAP/SMTP（不含 POP3、JMAP、Exchange 直连）。
+- IMAP 账户只支持 IMAP/SMTP（不含 POP3、JMAP）；Microsoft 365 / Outlook.com 走 Graph API（见 §1.1）。Graph 账户的「已回复」标记为近似值（Graph 列表不提供 answered 旗标）。
 - 富文本编辑器使用 `document.execCommand`，是本机 Chromium 的行为，功能足够但已废弃；后续可换可编辑层。
 - 会话聚合依赖邮件头的 `References` / `In-Reply-To`，主题相同但无引用头的邮件不会合并。
 - 搜索为 SQLite `LIKE`（不是 FTS5）：几千封邮件的本地缓存下足够快，超过十万封需要换 FTS。

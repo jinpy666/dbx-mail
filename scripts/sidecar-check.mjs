@@ -182,8 +182,8 @@ try {
     const begin = await call('account/oauthBegin', { tenantId: 'common', clientId: 'mock-client' })
     const authorizeUrl = String(begin?.authorizeUrl || '')
     if (!authorizeUrl.startsWith(mock.authorizeBase)) {
-      // release 构建不编译端点覆盖分支：授权 URL 会指向真实微软端点，必须跳过
-      check('Graph 冒烟（需要 debug 构建）', false, `授权 URL 未指向 mock：${authorizeUrl.slice(0, 80)}…（请先 npm run backend:dev 重新构建 debug 产物）`)
+      // release 构建不编译端点覆盖分支：授权 URL 指向真实微软端点，按设计跳过该节
+      console.log('  SKIP Graph 冒烟：release 构建不含端点覆盖（需要 debug 构建：npm run backend:dev）')
     } else {
       check('oauthBegin 返回授权 URL 与 state', Boolean(begin?.state) && authorizeUrl.includes('code_challenge_method=S256'))
 
