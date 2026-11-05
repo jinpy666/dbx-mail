@@ -12,6 +12,13 @@ pub struct Account {
     pub email: String,
     pub display_name: String,
     pub username: String,
+    /// imap / graph（graph = Microsoft 365 / Outlook.com，走 Graph API）
+    pub provider: String,
+    /// password / oauth2
+    pub auth_type: String,
+    /// OAuth2 租户（graph 账户）：common / organizations / consumers / GUID
+    pub tenant_id: String,
+    pub client_id: String,
     pub imap_host: String,
     pub imap_port: u16,
     /// tls / starttls / none
@@ -237,11 +244,20 @@ pub struct ProviderPreset {
     pub key: String,
     pub label: String,
     pub domains: Vec<String>,
+    /// imap / graph；graph 预设不含服务器字段，走 OAuth 授权
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
     pub imap_host: String,
+    #[serde(default)]
     pub imap_port: u16,
+    #[serde(default)]
     pub imap_security: String,
+    #[serde(default)]
     pub smtp_host: String,
+    #[serde(default)]
     pub smtp_port: u16,
+    #[serde(default)]
     pub smtp_security: String,
     pub hint: String,
 }

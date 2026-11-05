@@ -22,6 +22,7 @@ pub fn presets() -> Vec<ProviderPreset> {
         ProviderPreset {
             key: "gmail".into(),
             label: "Gmail".into(),
+            provider: "imap".into(),
             domains: vec!["gmail.com".into(), "googlemail.com".into()],
             imap_host: "imap.gmail.com".into(),
             imap_port: 993,
@@ -34,6 +35,7 @@ pub fn presets() -> Vec<ProviderPreset> {
         ProviderPreset {
             key: "outlook".into(),
             label: "Outlook / Microsoft 365".into(),
+            provider: "imap".into(),
             domains: vec!["outlook.com".into(), "hotmail.com".into(), "live.com".into(), "office365.com".into()],
             imap_host: "outlook.office365.com".into(),
             imap_port: 993,
@@ -46,6 +48,7 @@ pub fn presets() -> Vec<ProviderPreset> {
         ProviderPreset {
             key: "qq".into(),
             label: "QQ 邮箱".into(),
+            provider: "imap".into(),
             domains: vec!["qq.com".into(), "foxmail.com".into()],
             imap_host: "imap.qq.com".into(),
             imap_port: 993,
@@ -58,6 +61,7 @@ pub fn presets() -> Vec<ProviderPreset> {
         ProviderPreset {
             key: "exmail".into(),
             label: "腾讯企业邮".into(),
+            provider: "imap".into(),
             domains: vec!["exmail.qq.com".into()],
             imap_host: "imap.exmail.qq.com".into(),
             imap_port: 993,
@@ -70,6 +74,7 @@ pub fn presets() -> Vec<ProviderPreset> {
         ProviderPreset {
             key: "163".into(),
             label: "网易 163 / 126".into(),
+            provider: "imap".into(),
             domains: vec!["163.com".into(), "126.com".into(), "yeah.net".into()],
             imap_host: "imap.163.com".into(),
             imap_port: 993,
@@ -82,6 +87,7 @@ pub fn presets() -> Vec<ProviderPreset> {
         ProviderPreset {
             key: "aliyun".into(),
             label: "阿里云邮箱".into(),
+            provider: "imap".into(),
             domains: vec!["aliyun.com".into(), "aliyun.cn".into()],
             imap_host: "imap.aliyun.com".into(),
             imap_port: 993,
@@ -94,6 +100,7 @@ pub fn presets() -> Vec<ProviderPreset> {
         ProviderPreset {
             key: "icloud".into(),
             label: "iCloud 邮箱".into(),
+            provider: "imap".into(),
             domains: vec!["icloud.com".into(), "me.com".into(), "mac.com".into()],
             imap_host: "imap.mail.me.com".into(),
             imap_port: 993,
@@ -106,6 +113,7 @@ pub fn presets() -> Vec<ProviderPreset> {
         ProviderPreset {
             key: "yahoo".into(),
             label: "Yahoo Mail".into(),
+            provider: "imap".into(),
             domains: vec!["yahoo.com".into()],
             imap_host: "imap.mail.yahoo.com".into(),
             imap_port: 993,
@@ -148,6 +156,21 @@ pub fn account_from_params(params: &Value, id: i64) -> Result<Account, String> {
         if smtp_host.is_empty() {
             smtp_host = preset.smtp_host.clone();
         }
+    }
+    let provider = {
+        let value = crate::param_str(params, "provider");
+        if value.is_empty() {
+            preset.as_ref().map(|item| item.provider.clone()).unwrap_or_else(|| "imap".into())
+        } else {
+            value
+        }
+    };
+    let tenant_id = crate::param_str(params, "tenantId").trim().to_string();
+    let client_id = crate::param_str(params, "clientId").trim().to_string();
+    // Graph 账户不走 IMAP/SMTP 传输，服务器字段仅作占位（数据库 NOT NULL）
+    if provider == "graph" {
+        imap_host = "graph.microsoft.com".into();
+        smtp_host = "graph.microsoft.com".into();
     }
     let username = {
         let value = crate::param_str(params, "username").trim().to_string();
@@ -198,6 +221,10 @@ pub fn account_from_params(params: &Value, id: i64) -> Result<Account, String> {
         email,
         display_name,
         username,
+        provider: provider.clone(),
+        auth_type: if provider == "graph" { "oauth2".into() } else { "password".into() },
+        tenant_id,
+        client_id,
         imap_host,
         imap_port,
         imap_security,
@@ -394,6 +421,7 @@ pub fn discover(app: Arc<App>, account_id: i64) -> Result<Value, String> {
             &mailbox.role,
             mailbox.selectable,
             index as i64,
+            "",
         );
     }
     for (name, (total, unread)) in &remote.1 {

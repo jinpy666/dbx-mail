@@ -66,6 +66,7 @@ pub async fn sync_account(app: Arc<App>, account_id: i64, options: SyncOptions) 
                 &mailbox.role,
                 mailbox.selectable,
                 index as i64,
+                "",
             ) {
                 report.errors.push(format!("保存文件夹「{}」失败：{error}", mailbox.name));
             }
