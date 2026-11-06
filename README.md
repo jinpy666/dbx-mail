@@ -185,6 +185,28 @@ CHROMIUM_PATH=/path/to/chrome \
 node scripts/sanitize-check.mjs
 ```
 
+### 经 DavMail 连 Microsoft 365（OAuth 环境用）
+
+企业租户关掉 basic auth 后，IMAP 只留 `AUTH=XOAUTH2`，插件拿密码登不进去。
+可先用 DavMail 做本地协议翻译网关（IMAP/SMTP → EWS），再让插件连 `127.0.0.1`：
+
+```bash
+# 1) 解压 DavMail 到 .tools/davmail（需 jar + lib/，已在 .gitignore 里）
+#    https://sourceforge.net/projects/davmail/files/davmail/
+# 2) 一键登录：自动拉起网关 → 打印设备码并打开浏览器 → 登录成功后自动联调
+node scripts/davmail-login.mjs --email you@contoso.com --check --keep-gateway
+# 3) 单独跑联调（网关已在跑时）
+node scripts/davmail-check.mjs --email you@contoso.com
+# 4) 收工
+node scripts/davmail-login.mjs --stop
+```
+
+- `davmail-login.mjs` 用 `-Duser.home` 把配置沙箱到 `.tools/davmail/home`，不碰真实家目录；
+  只监听 `127.0.0.1`，并关闭本地 TLS（自签证书过不了 rustls 的根证书校验）。
+- `davmail-check.mjs` 不经过宿主 UI，直接以子进程拉起 sidecar 跑
+  `plugin/initialize → account/test → account/add → account/discover → mailbox/sync → mail/list → mail/open`。
+- 插件里添加账户时填：IMAP `127.0.0.1:1143`、SMTP `127.0.0.1:1025`、加密方式**无**、密码随意（DavMail 自己走 OAuth）。
+
 ## 6.3 同步范围
 
 - 默认 `primary`：只同步收件箱 / 已发送 / 草稿 / 存档；自定义文件夹（如「12306」「通行费」）不进同步队列。
