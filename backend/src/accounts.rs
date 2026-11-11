@@ -479,6 +479,7 @@ pub fn remove(app: Arc<App>, params: &Value) -> Result<Value, String> {
     };
     app.secrets.delete(&format!("mail:{}", account.email));
     app.secrets.delete(&format!("oauth2:{}", account.email));
+    app.secrets.delete(&format!("graphsecret:{}", account.email));
     {
         let conn = app.db();
         db::account_delete(&conn, id).map_err(|error| format!("删除账户失败：{error}"))?;

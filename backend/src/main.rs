@@ -468,7 +468,22 @@ fn dispatch(app: &Arc<App>, method: &str, params: &Value) -> RpcResult {
             let tenant = param_str(params, "tenantId");
             let client = param_str(params, "clientId");
             // 机密客户端：回调时的 code 交换需要 client_secret（仅驻内存）
-            let secret = param_str(params, "clientSecret");
+            let mut secret = param_str(params, "clientSecret");
+            if secret.trim().is_empty() {
+                // 重新授权场景：前端拿不到（也不该拿到）存量 secret，按账户从
+                // SecretStore 取回注入 pending，否则机密客户端的 code 交换必被拒
+                let account_id = param_int(params, "accountId", 0);
+                if account_id > 0 {
+                    let conn = app.db();
+                    if let Ok(Some(row)) = db::account_get(&conn, account_id) {
+                        if row.provider == "graph" {
+                            if let Ok(stored) = app.secrets.load(&format!("graphsecret:{}", row.email)) {
+                                secret = stored;
+                            }
+                        }
+                    }
+                }
+            }
             if client.trim().is_empty() {
                 return Err(RpcError::invalid("请填写 Azure 应用的 Client ID"));
             }

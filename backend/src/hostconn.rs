@@ -398,7 +398,9 @@ pub fn connect(app: Arc<App>, params: &Value) -> Result<Value, String> {
         };
         if let Ok(Some(row)) = existing {
             if row.host_bound {
-                // 幂等返回前刷新会话凭据：宿主编辑表单后会对同一连接重发 connect
+                // 幂等返回前重应用 lifecycle spec：宿主编辑表单后会对同一连接重发
+                // connect，端点/用户名/Graph 配置必须跟着更新；会话凭据随后刷新
+                let account_id = ensure_account_row(&app, &spec)?;
                 {
                     let mut sessions = app.host_sessions.lock().unwrap_or_else(|e| e.into_inner());
                     upsert_session(
@@ -536,11 +538,15 @@ fn ensure_account_row(app: &App, spec: &Spec) -> Result<i64, String> {
             }
             if row.provider == "graph" {
                 if spec.account.auth_type == crate::model::AUTH_TYPE_APP_ONLY {
-                    // 纯后台连接：宿主表单显式给出接入方式，落库 auth_type/user_id
+                    // 纯后台连接：宿主表单显式给出接入方式，落库 auth_type/user_id/tenant/client
                     db::account_apply_host(&conn, row.id, &spec.account, &spec.connection_id)
                         .map_err(|error| format!("保存账户失败：{error}"))?;
+                } else {
+                    // 浏览器授权壳：保留原 tenant/client 与授权状态，仅绑定连接标记
+                    // （不动 OAuth 凭据），保证 byConnection 查得到该账户
+                    db::account_bind_host(&conn, row.id, &spec.connection_id)
+                        .map_err(|error| format!("保存账户失败：{error}"))?;
                 }
-                // 浏览器授权壳：保留原 tenant/client 与授权状态，仅复用
                 return Ok(row.id);
             }
             db::account_apply_host(&conn, row.id, &spec.account, &spec.connection_id)

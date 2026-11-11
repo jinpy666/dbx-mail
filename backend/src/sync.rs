@@ -686,14 +686,22 @@ pub async fn move_messages(app: Arc<App>, ids: &[i64], destination: Destination)
 
             let target = match &destination {
                 Destination::Mailbox(target_id) => {
-                    let found: Option<(i64, String)> = conn
+                    let found: Option<(i64, String, i64)> = conn
                         .query_row(
-                            "SELECT id, name FROM mailboxes WHERE id = ?1",
+                            "SELECT id, name, account_id FROM mailboxes WHERE id = ?1",
                             params![target_id],
-                            |row| Ok((row.get(0)?, row.get(1)?)),
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                         )
                         .ok();
-                    found.map(|(id, name)| (id, name, false))
+                    // 目的地必须与邮件同账户：Graph/IMAP 都无法跨账户寻址远端文件夹
+                    if let Some((_, name, target_account)) = &found {
+                        if *target_account != account_id {
+                            return Err(format!(
+                                "目标文件夹 {name} 属于其他账户，禁止跨账户移动"
+                            ));
+                        }
+                    }
+                    found.map(|(id, name, _)| (id, name, false))
                 }
                 Destination::Trash => {
                     if source_role == "trash" {
@@ -744,10 +752,11 @@ pub async fn move_messages(app: Arc<App>, ids: &[i64], destination: Destination)
         };
         let Some(account) = account else { continue };
         if account.provider == "graph" {
-            // Graph：目标文件夹按 remote_id 寻址
+            // Graph：目标文件夹按 remote_id 寻址；移动会换新 ID，失败必须如实上报
             let push = async {
                 let token = crate::oauth::access_token(&app, &account).await?;
                 let client = graph::GraphClient::new(token, &account.user_id);
+                let mut failures: Vec<String> = Vec::new();
                 for job in group {
                     if job.remote_id.is_empty() {
                         continue;
@@ -756,26 +765,38 @@ pub async fn move_messages(app: Arc<App>, ids: &[i64], destination: Destination)
                         let conn = app.db();
                         db::mailbox_remote_id(&conn, job.target_id).unwrap_or_default()
                     };
-                    let done = if target_remote.is_empty() {
-                        false
+                    let result = if target_remote.is_empty() {
+                        Err("目标文件夹缺少远端 ID".to_string())
                     } else if job.permanent {
-                        client.delete_message(&job.remote_id).await.is_ok()
+                        client.delete_message(&job.remote_id).await.map(|_| String::new())
                     } else {
-                        client.move_message(&job.remote_id, &target_remote).await.is_ok()
+                        client.move_message(&job.remote_id, &target_remote).await
                     };
-                    if done {
-                        let conn = app.db();
-                        if job.permanent {
-                            let _ = db::message_delete(&conn, job.id);
-                        } else {
-                            let _ = db::message_set_mailbox(&conn, job.id, job.target_id);
+                    match result {
+                        Ok(new_remote_id) => {
+                            let conn = app.db();
+                            if job.permanent {
+                                let _ = db::message_delete(&conn, job.id);
+                            } else {
+                                let _ = db::message_set_mailbox(&conn, job.id, job.target_id);
+                                let _ = db::message_set_remote(&conn, job.id, &new_remote_id);
+                            }
                         }
+                        Err(error) => failures.push(format!("{}：{}", job.remote_id, error)),
                     }
                 }
-                Ok::<(), String>(())
+                if failures.is_empty() {
+                    Ok::<(), String>(())
+                } else {
+                    Err(format!(
+                        "{} 封移动/删除失败，本次按未移动处理：{}",
+                        failures.len(),
+                        failures[0]
+                    ))
+                }
             };
             if let Err(error) = push.await {
-                eprintln!("[dbx-mail] Graph 邮件移动失败：{error}");
+                return Err(error);
             }
             continue;
         }
@@ -978,7 +999,7 @@ async fn graph_sync_account(app: Arc<App>, account: Account, options: SyncOption
             let _ = db::mailbox_upsert(
                 &conn,
                 account.id,
-                &folder.display_name,
+                &folder.path,
                 "/",
                 &role,
                 true,

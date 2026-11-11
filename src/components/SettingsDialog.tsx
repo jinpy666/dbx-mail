@@ -342,7 +342,14 @@ function AccountCard({ account, locale }: { account: Account; locale: string }) 
       }
       await updateAccount(
         isGraph
-          ? { ...base, provider: 'graph', tenantId: account.tenantId, clientId: account.clientId }
+          ? {
+              ...base,
+              provider: 'graph',
+              tenantId: account.tenantId,
+              clientId: account.clientId,
+              // App-only 账户：漏传会被后端清空 user_id，令牌从此打到 /me 而失败
+              userId: account.userId,
+            }
           : {
               ...base,
               imapHost: account.imapHost,
@@ -366,7 +373,7 @@ function AccountCard({ account, locale }: { account: Account; locale: string }) 
     if (reauthBusy) return
     setReauthBusy(true)
     try {
-      const begin = await api.oauthBegin(account.tenantId || 'common', account.clientId)
+      const begin = await api.oauthBegin(account.tenantId || 'common', account.clientId, undefined, account.id)
       window.open(begin.authorizeUrl, '_blank', 'noopener')
       toast.info(t(locale, 'settings.reauthOpened'))
       const deadline = Date.now() + 5 * 60 * 1000

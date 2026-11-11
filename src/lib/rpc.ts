@@ -20,6 +20,8 @@ export interface Account {
   authType: string
   tenantId: string
   clientId: string
+  /** App-only 接入的目标邮箱（浏览器授权账户为空） */
+  userId?: string
   imapHost: string
   imapPort: number
   imapSecurity: string
@@ -334,8 +336,23 @@ export type OauthStatus =
 
 /** 发起 OAuth 授权：返回浏览器授权 URL（回环回调由 sidecar 接收）。
  *  机密客户端传 clientSecret（仅驻内存，用于回调时的 code 交换）。 */
-export function oauthBegin(tenantId: string, clientId: string, clientSecret?: string): Promise<OauthBegin> {
-  return call('account/oauthBegin', { tenantId, clientId, ...(clientSecret ? { clientSecret } : {}) }, NETWORK_TIMEOUT)
+export function oauthBegin(
+  tenantId: string,
+  clientId: string,
+  clientSecret?: string,
+  accountId?: number,
+): Promise<OauthBegin> {
+  return call(
+    'account/oauthBegin',
+    {
+      tenantId,
+      clientId,
+      ...(clientSecret ? { clientSecret } : {}),
+      // 重新授权：带上 accountId 让后端取回存量 secret（机密客户端的 code 交换必需）
+      ...(accountId ? { accountId } : {}),
+    },
+    NETWORK_TIMEOUT,
+  )
 }
 
 export function oauthStatus(state: string): Promise<OauthStatus> {

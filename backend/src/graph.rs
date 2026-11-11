@@ -17,8 +17,8 @@ use crate::oauth;
 
 /// 单个附件与 MIME 建草稿的大小红线（超过走 JSON + 上传会话回退）
 const MIME_CREATE_LIMIT: i64 = 4 * 1024 * 1024;
-/// 上传会话分片大小（Graph 推荐 ≤5MB 且为 320KB 的倍数）
-const UPLOAD_CHUNK: usize = 4 * 1024 * 1024;
+/// 上传会话分片大小：Graph 要求非末片必须是 320KB 的倍数（4 MiB 不对齐会被拒收）
+const UPLOAD_CHUNK: usize = 320 * 1024 * 15;
 /// 429/503 退避重试上限
 const MAX_RETRIES: usize = 3;
 
@@ -47,6 +47,9 @@ pub struct GraphMessage {
 pub struct GraphFolder {
     pub id: String,
     pub display_name: String,
+    /// 本地唯一键：完整路径（顶层=显示名；子文件夹=父路径/显示名，"/"分隔）。
+    /// Outlook 允许不同父级下同名文件夹，裸显示名会撞 (account_id, name) 唯一键
+    pub path: String,
     /// wellKnownFolderName（inbox / sentitems / drafts / deleteditems / junkemail / archive…）
     pub well_known: String,
     pub total: i64,
@@ -149,7 +152,8 @@ impl GraphClient {
     /// 单个文件夹（同步后刷新计数用）
     pub async fn folder(&self, folder_id: &str) -> Result<GraphFolder, String> {
         let value = self.get_json(&format!("{}/mailFolders/{folder_id}", self.base)).await?;
-        folder_from(&value).ok_or_else(|| "文件夹响应缺少 id".to_string())
+        let path = value.get("displayName").and_then(Value::as_str).unwrap_or("").to_string();
+        folder_from(&value, path).ok_or_else(|| "文件夹响应缺少 id".to_string())
     }
 
     /// 全部可见文件夹（含子文件夹，深度 ≤3）
@@ -163,9 +167,10 @@ impl GraphClient {
                 if item.get("isHidden").and_then(Value::as_bool).unwrap_or(false) {
                     continue;
                 }
-                if let Some(folder) = folder_from(&item) {
+                if let Some(folder) = folder_from(&item, item.get("displayName").and_then(Value::as_str).unwrap_or("").to_string()) {
                     result.push(folder.clone());
-                    self.collect_children(&folder.id, 1, &mut result).await?;
+                    let child_path = folder.path.clone();
+                    self.collect_children(&folder.id, &child_path, 1, &mut result).await?;
                 }
             }
             match page.get("@odata.nextLink").and_then(Value::as_str) {
@@ -176,7 +181,7 @@ impl GraphClient {
         Ok(result)
     }
 
-    async fn collect_children(&self, parent_id: &str, depth: usize, result: &mut Vec<GraphFolder>) -> Result<(), String> {
+    async fn collect_children(&self, parent_id: &str, parent_path: &str, depth: usize, result: &mut Vec<GraphFolder>) -> Result<(), String> {
         if depth > 3 {
             return Ok(());
         }
@@ -188,9 +193,14 @@ impl GraphClient {
                 if item.get("isHidden").and_then(Value::as_bool).unwrap_or(false) {
                     continue;
                 }
-                if let Some(folder) = folder_from(&item) {
+                let path = format!(
+                    "{parent_path}/{}",
+                    item.get("displayName").and_then(Value::as_str).unwrap_or("")
+                );
+                if let Some(folder) = folder_from(&item, path) {
                     result.push(folder.clone());
-                    Box::pin(self.collect_children(&folder.id, depth + 1, result)).await?;
+                    let child_path = folder.path.clone();
+                    Box::pin(self.collect_children(&folder.id, &child_path, depth + 1, result)).await?;
                 }
             }
             match page.get("@odata.nextLink").and_then(Value::as_str) {
@@ -228,11 +238,16 @@ impl GraphClient {
             for item in page.get("value").and_then(Value::as_array).into_iter().flatten() {
                 result.push(parse_delta_message(item));
             }
+            // 首次同步限量：收满即止（$top 只是页大小，nextLink 会翻完整邮箱）
+            if result.len() >= limit {
+                break;
+            }
             match page.get("@odata.nextLink").and_then(Value::as_str) {
                 Some(next) => url = next.to_string(),
                 None => break,
             }
         }
+        result.truncate(limit);
         Ok(result)
     }
 
@@ -274,14 +289,20 @@ impl GraphClient {
         .map(|_| ())
     }
 
-    pub async fn move_message(&self, message_id: &str, folder_id: &str) -> Result<(), String> {
-        self.send_json(
-            reqwest::Method::POST,
-            &format!("{}/move", self.message_url(message_id)),
-            json!({ "destinationId": folder_id }),
-        )
-        .await
-        .map(|_| ())
+    /// 移动消息；Graph 默认 ID 机制下移动会换新 ID，返回响应里的新 remote_id
+    pub async fn move_message(&self, message_id: &str, folder_id: &str) -> Result<String, String> {
+        let moved = self
+            .send_json(
+                reqwest::Method::POST,
+                &format!("{}/move", self.message_url(message_id)),
+                json!({ "destinationId": folder_id }),
+            )
+            .await?;
+        moved
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| "移动响应缺少新消息 ID".to_string())
     }
 
     pub async fn delete_message(&self, message_id: &str) -> Result<(), String> {
@@ -353,6 +374,7 @@ impl GraphClient {
             size: mime.len() as i64,
         };
         let parsed = crate::mime::parse(mime, &ctx).ok_or_else(|| "解析发件内容失败".to_string())?;
+        let bcc_addrs = crate::mime::parse_bcc(mime);
         let html = parsed.html.clone();
         let text = parsed.text.clone();
         let content_type = if html.is_empty() { "Text" } else { "HTML" };
@@ -363,6 +385,7 @@ impl GraphClient {
             "body": { "contentType": content_type, "content": body_content },
             "toRecipients": recipients(&parsed.header.to_addrs),
             "ccRecipients": recipients(&parsed.header.cc_addrs),
+            "bccRecipients": recipients(&bcc_addrs),
         });
         let draft = self
             .send_json(reqwest::Method::POST, &format!("{}/messages", self.base), message)
@@ -438,11 +461,12 @@ impl GraphClient {
 
 /* ---------------- 纯函数与解析 ---------------- */
 
-fn folder_from(item: &Value) -> Option<GraphFolder> {
+fn folder_from(item: &Value, path: String) -> Option<GraphFolder> {
     let id = item.get("id")?.as_str()?.to_string();
     Some(GraphFolder {
         id,
         display_name: item.get("displayName").and_then(Value::as_str).unwrap_or("").to_string(),
+        path,
         well_known: item.get("wellKnownFolderName").and_then(Value::as_str).unwrap_or("").to_string(),
         total: item.get("totalItemCount").and_then(Value::as_i64).unwrap_or(0),
         unread: item.get("unreadItemCount").and_then(Value::as_i64).unwrap_or(0),

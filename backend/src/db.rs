@@ -378,8 +378,9 @@ pub fn account_apply_host(
              imap_host = ?4, imap_port = ?5, imap_security = ?6, \
              smtp_host = ?7, smtp_port = ?8, smtp_security = ?9, \
              provider = ?10, auth_type = ?11, last_error = '', \
-             host_bound = 1, host_connection_id = ?12, user_id = ?13 \
-         WHERE id = ?14",
+             host_bound = 1, host_connection_id = ?12, user_id = ?13, \
+             tenant_id = ?14, client_id = ?15 \
+         WHERE id = ?16",
         params![
             account.email,
             account.display_name,
@@ -394,8 +395,20 @@ pub fn account_apply_host(
             account.auth_type,
             connection_id,
             account.user_id,
+            account.tenant_id,
+            account.client_id,
             id,
         ],
+    )?;
+    Ok(())
+}
+
+/// 只绑定连接标记（不动身份/端点/凭据）：浏览器授权壳复用向导账户时用，
+/// 保证 account/byConnection 能按 host_connection_id 找到该账户
+pub fn account_bind_host(conn: &Connection, id: i64, connection_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE accounts SET host_bound = 1, host_connection_id = ?2, last_error = '' WHERE id = ?1",
+        params![id, connection_id],
     )?;
     Ok(())
 }
@@ -1144,6 +1157,16 @@ pub fn message_set_mailbox(conn: &Connection, id: i64, mailbox_id: i64) -> rusql
     conn.execute(
         "UPDATE messages SET mailbox_id = ?2 WHERE id = ?1",
         params![id, mailbox_id],
+    )?;
+    Ok(())
+}
+
+/// Graph 移动后更新远端 ID：默认 ID 机制下 move 响应返回替换后的新 ID，
+/// 不更新会导致后续正文/旗标寻址旧 ID 失败、delta 回流产生重复
+pub fn message_set_remote(conn: &Connection, id: i64, remote_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE messages SET remote_id = ?2 WHERE id = ?1",
+        params![id, remote_id],
     )?;
     Ok(())
 }
