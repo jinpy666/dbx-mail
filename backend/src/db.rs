@@ -207,7 +207,32 @@ CREATE INDEX IF NOT EXISTS messages_by_remote
 "#,
         )?;
     }
-    conn.pragma_update(None, "user_version", 2)?;
+    // v3：DBX 宿主连接管理（connection-provider）。账户行带 host 标记：
+    // 连接期凭据只在 sidecar 内存会话里（不进本地密钥库），断开只复位标记、
+    // 保留本地缓存。旧行默认 host_bound=0，行为与 v2 完全一致。
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap_or(0);
+    if version < 3 {
+        conn.execute_batch(
+            r#"
+ALTER TABLE accounts ADD COLUMN host_bound         INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE accounts ADD COLUMN host_connection_id TEXT    NOT NULL DEFAULT '';
+"#,
+        )?;
+    }
+    // v4：M365 纯后台接入与机密客户端。user_id 为 client_credentials 模式的
+    // 目标邮箱（Graph /users/{id}/... 路径）；client_secret 只存 SecretStore，
+    // 这里只放引用，绝不落明文。
+    if version < 4 {
+        conn.execute_batch(
+            r#"
+ALTER TABLE accounts ADD COLUMN user_id            TEXT    NOT NULL DEFAULT '';
+ALTER TABLE accounts ADD COLUMN client_secret_ref  TEXT    NOT NULL DEFAULT '';
+"#,
+        )?;
+    }
+    conn.pragma_update(None, "user_version", 4)?;
     Ok(())
 }
 
@@ -284,7 +309,7 @@ pub fn save_settings(conn: &Connection, settings: &Settings) -> rusqlite::Result
 const ACCOUNT_COLUMNS: &str = "id, email, display_name, username, provider, auth_type, tenant_id, client_id, \
      imap_host, imap_port, imap_security, \
      smtp_host, smtp_port, smtp_security, signature, color, sync_enabled, sync_interval, \
-     last_sync_at, last_error";
+     last_sync_at, last_error, host_bound, host_connection_id, user_id";
 
 fn row_to_account(row: &Row<'_>) -> rusqlite::Result<Account> {
     Ok(Account {
@@ -308,6 +333,9 @@ fn row_to_account(row: &Row<'_>) -> rusqlite::Result<Account> {
         sync_interval: row.get("sync_interval")?,
         last_sync_at: row.get("last_sync_at")?,
         last_error: row.get("last_error")?,
+        host_bound: int_bool(row.get("host_bound")?),
+        host_connection_id: row.get("host_connection_id")?,
+        user_id: row.get("user_id")?,
     })
 }
 
@@ -328,6 +356,59 @@ pub fn account_by_email(conn: &Connection, email: &str) -> rusqlite::Result<Opti
     conn.query_row(&sql, params![email], row_to_account).optional()
 }
 
+/// 按 DBX 宿主连接 id 找绑定的账户行
+pub fn account_by_host(conn: &Connection, connection_id: &str) -> rusqlite::Result<Option<Account>> {
+    let sql = format!("SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE host_connection_id = ?1");
+    conn.query_row(&sql, params![connection_id], row_to_account).optional()
+}
+
+/// 把账户行绑定为「宿主连接管理」来源，并刷新连接相关列。
+///
+/// 只动身份列、服务器端点列与 host 标记列；签名、颜色、同步开关等用户偏好
+/// 保持不变（复用向导账户时也不覆盖用户设置）。凭据不在这里写：host 账户的
+/// 密码只在 sidecar 内存会话里，`password_ref` 维持原值（新建行则为空）。
+pub fn account_apply_host(
+    conn: &Connection,
+    id: i64,
+    account: &Account,
+    connection_id: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE accounts SET email = ?1, display_name = ?2, username = ?3, \
+             imap_host = ?4, imap_port = ?5, imap_security = ?6, \
+             smtp_host = ?7, smtp_port = ?8, smtp_security = ?9, \
+             provider = ?10, auth_type = ?11, last_error = '', \
+             host_bound = 1, host_connection_id = ?12, user_id = ?13 \
+         WHERE id = ?14",
+        params![
+            account.email,
+            account.display_name,
+            account.username,
+            account.imap_host,
+            account.imap_port,
+            account.imap_security,
+            account.smtp_host,
+            account.smtp_port,
+            account.smtp_security,
+            account.provider,
+            account.auth_type,
+            connection_id,
+            account.user_id,
+            id,
+        ],
+    )?;
+    Ok(())
+}
+
+/// 断开宿主连接：只复位 host 标记，账户行与全部本地缓存保留
+pub fn account_unbind_host(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE accounts SET host_bound = 0, host_connection_id = '' WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
 /// 新增账户，返回自增 id
 #[allow(clippy::too_many_arguments)]
 pub fn account_insert(conn: &Connection, account: &Account, password_ref: &str) -> rusqlite::Result<i64> {
@@ -335,9 +416,9 @@ pub fn account_insert(conn: &Connection, account: &Account, password_ref: &str) 
         "INSERT INTO accounts(email, display_name, username, password_ref, provider, auth_type,
              tenant_id, client_id, imap_host, imap_port, imap_security, smtp_host, smtp_port,
              smtp_security, signature, color, sync_enabled, sync_interval, last_sync_at,
-             last_error, sort_order, created_at)
+             last_error, sort_order, created_at, user_id)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-             ?18, 0, '', 0, ?19)",
+             ?18, 0, '', 0, ?19, ?20)",
         params![
             account.email,
             account.display_name,
@@ -358,6 +439,7 @@ pub fn account_insert(conn: &Connection, account: &Account, password_ref: &str) 
             if account.sync_enabled { 1 } else { 0 },
             account.sync_interval,
             crate::now_ms(),
+            account.user_id,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -368,7 +450,7 @@ pub fn account_update(conn: &Connection, account: &Account) -> rusqlite::Result<
         "UPDATE accounts SET display_name = ?2, username = ?3, imap_host = ?4, imap_port = ?5,
              imap_security = ?6, smtp_host = ?7, smtp_port = ?8, smtp_security = ?9,
              signature = ?10, color = ?11, sync_enabled = ?12, sync_interval = ?13,
-             tenant_id = ?14, client_id = ?15
+             tenant_id = ?14, client_id = ?15, user_id = ?16
          WHERE id = ?1",
         params![
             account.id,
@@ -386,6 +468,7 @@ pub fn account_update(conn: &Connection, account: &Account) -> rusqlite::Result<
             account.sync_interval,
             account.tenant_id,
             account.client_id,
+            account.user_id,
         ],
     )?;
     Ok(())
@@ -404,6 +487,25 @@ pub fn account_password_ref(conn: &Connection, id: i64) -> rusqlite::Result<Stri
     )
     .optional()
     .map(|value| value.unwrap_or_default())
+}
+
+/// Azure client_secret 只存 SecretStore，这里只放引用；空串表示未配置
+pub fn account_client_secret_ref(conn: &Connection, id: i64) -> rusqlite::Result<String> {
+    conn.query_row(
+        "SELECT client_secret_ref FROM accounts WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map(|value| value.unwrap_or_default())
+}
+
+pub fn account_set_client_secret_ref(conn: &Connection, id: i64, reference: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE accounts SET client_secret_ref = ?2 WHERE id = ?1",
+        params![id, reference],
+    )?;
+    Ok(())
 }
 
 pub fn account_set_sync(conn: &Connection, id: i64, at: i64, error: &str) -> rusqlite::Result<()> {
@@ -885,6 +987,36 @@ pub fn message_set_raw(conn: &Connection, id: i64, raw_path: &str) -> rusqlite::
 
 pub fn message_mark_body_loaded(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     conn.execute("UPDATE messages SET body_loaded = 1 WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// 懒加载补全线程头：只填空字段，不覆盖已有值（正文按需下载后由 ensure_body 回填）
+pub fn message_backfill_header(
+    conn: &Connection,
+    id: i64,
+    message_id: &str,
+    in_reply_to: &str,
+    references: &[String],
+    reply_to: &str,
+    size: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE messages SET
+            message_id = CASE WHEN message_id = '' THEN ?2 ELSE message_id END,
+            in_reply_to = CASE WHEN in_reply_to = '' THEN ?3 ELSE in_reply_to END,
+            refs = CASE WHEN refs = '' OR refs = '[]' THEN ?4 ELSE refs END,
+            reply_to = CASE WHEN reply_to = '' THEN ?5 ELSE reply_to END,
+            size = CASE WHEN size = 0 THEN ?6 ELSE size END
+         WHERE id = ?1",
+        params![
+            id,
+            message_id,
+            in_reply_to,
+            json_list(references),
+            reply_to,
+            size
+        ],
+    )?;
     Ok(())
 }
 
@@ -1521,7 +1653,8 @@ CREATE TABLE messages (
 );
 PRAGMA user_version = 1;
 "#,
-        );
+        )
+        .unwrap();
         conn
     }
 
@@ -1535,6 +1668,7 @@ PRAGMA user_version = 1;
             auth_type: if provider == "graph" { "oauth2".into() } else { "password".into() },
             tenant_id: if provider == "graph" { "common".into() } else { String::new() },
             client_id: if provider == "graph" { "client-1".into() } else { String::new() },
+            user_id: String::new(),
             imap_host: if provider == "graph" { "graph.microsoft.com".into() } else { "imap.example.com".into() },
             imap_port: 993,
             imap_security: "tls".into(),
@@ -1547,6 +1681,8 @@ PRAGMA user_version = 1;
             sync_interval: 5,
             last_sync_at: 0,
             last_error: String::new(),
+            host_bound: false,
+            host_connection_id: String::new(),
         }
     }
 
@@ -1590,18 +1726,18 @@ PRAGMA user_version = 1;
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 4);
         let account_id = insert_account(&conn, "graph");
         let account = account_get(&conn, account_id).unwrap().unwrap();
         assert_eq!(account.provider, "graph");
         assert_eq!(account.auth_type, "oauth2");
         assert_eq!(account.tenant_id, "common");
-        // 全新库（建表后直接迁移）同样拿到 v2 形状
+        // 全新库（建表后直接迁移）同样拿到 v4 形状
         let fresh = test_db();
         let version: i64 = fresh
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -1668,5 +1804,72 @@ PRAGMA user_version = 1;
             .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
             .unwrap();
         assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn message_backfill_header_fills_only_empty_fields() {
+        let conn = test_db();
+        let account_id = insert_account(&conn, "graph");
+        let mailbox_id = mailbox_upsert(&conn, account_id, "收件箱", "/", "inbox", true, 0, "folder-1").unwrap();
+        // 懒加载入库：线程头字段全空、size 未知
+        let mut header = sample_header(account_id, mailbox_id, "a");
+        header.message_id = String::new();
+        header.in_reply_to = String::new();
+        header.reply_to = String::new();
+        header.references = Vec::new();
+        header.size = 0;
+        let id = message_upsert_remote(&conn, &header, "msg-a").unwrap();
+
+        message_backfill_header(
+            &conn,
+            id,
+            "<m1@example.com>",
+            "<parent@example.com>",
+            &["<root@example.com>".to_string()],
+            "reply@example.com",
+            4096,
+        )
+        .unwrap();
+        let row = |conn: &Connection| -> (String, String, String, String, i64) {
+            conn.query_row(
+                "SELECT message_id, in_reply_to, refs, reply_to, size FROM messages WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap()
+        };
+        let (message_id, in_reply_to, refs, reply_to, size) = row(&conn);
+        assert_eq!(message_id, "<m1@example.com>");
+        assert_eq!(in_reply_to, "<parent@example.com>");
+        assert_eq!(reply_to, "reply@example.com");
+        assert_eq!(size, 4096);
+        assert!(refs.contains("<root@example.com>"));
+
+        // 已有值不被覆盖
+        message_backfill_header(
+            &conn,
+            id,
+            "<other@example.com>",
+            "<other-parent@example.com>",
+            &["<other-root@example.com>".to_string()],
+            "other@example.com",
+            8192,
+        )
+        .unwrap();
+        let (message_id, in_reply_to, refs, reply_to, size) = row(&conn);
+        assert_eq!(message_id, "<m1@example.com>");
+        assert_eq!(in_reply_to, "<parent@example.com>");
+        assert_eq!(reply_to, "reply@example.com");
+        assert_eq!(size, 4096);
+        assert!(refs.contains("<root@example.com>"));
+        assert!(!refs.contains("<other-root@example.com>"));
     }
 }

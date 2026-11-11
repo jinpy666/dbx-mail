@@ -6,6 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use futures_util::StreamExt;
 use rusqlite::params;
 
 use crate::db;
@@ -451,6 +452,16 @@ pub async fn ensure_body(app: Arc<App>, message_id: i64, allow_network: bool) ->
         let _ = db::body_save(&conn, message_id, &parsed.text, &parsed.html, &parsed.calendar);
         let _ = db::attachments_replace(&conn, message_id, &parsed.attachments);
         let _ = db::message_mark_body_loaded(&conn, message_id);
+        // 懒加载行补全线程头与真实大小（已有值不覆盖）
+        let _ = db::message_backfill_header(
+            &conn,
+            message_id,
+            &parsed.header.message_id,
+            &parsed.header.in_reply_to,
+            &parsed.header.references,
+            &parsed.header.reply_to,
+            raw.len() as i64,
+        );
         if parsed.header.has_attachments {
             let _ = conn.execute(
                 "UPDATE messages SET has_attachments = 1, snippet = CASE WHEN snippet = '' THEN ?2 ELSE snippet END WHERE id = ?1",
@@ -540,7 +551,7 @@ pub async fn set_flags(
         let Some(account) = account else { continue };
         let push = async {
             let token = crate::oauth::access_token(&app, &account).await?;
-            let client = graph::GraphClient::new(token);
+            let client = graph::GraphClient::new(token, &account.user_id);
             for job in group {
                 let mut ok = true;
                 if let Some(value) = seen {
@@ -736,7 +747,7 @@ pub async fn move_messages(app: Arc<App>, ids: &[i64], destination: Destination)
             // Graph：目标文件夹按 remote_id 寻址
             let push = async {
                 let token = crate::oauth::access_token(&app, &account).await?;
-                let client = graph::GraphClient::new(token);
+                let client = graph::GraphClient::new(token, &account.user_id);
                 for job in group {
                     if job.remote_id.is_empty() {
                         continue;
@@ -856,7 +867,7 @@ pub async fn deliver(app: Arc<App>, item: OutboxItem) -> Result<(), String> {
         // Graph 发送：MIME 建草稿保住线程头，send 后自动落 Sent Items，无需本地 append
         let token = crate::oauth::access_token(&app, &account).await?;
         let raw = smtp::build(&outgoing)?;
-        graph::GraphClient::new(token).send_mime(&raw).await?;
+        graph::GraphClient::new(token, &account.user_id).send_mime(&raw).await?;
     } else {
         let password = app.load_password(account.id)?;
         let login = SmtpLogin {
@@ -950,7 +961,7 @@ async fn graph_sync_account(app: Arc<App>, account: Account, options: SyncOption
             return Err(error);
         }
     };
-    let client = graph::GraphClient::new(token);
+    let client = graph::GraphClient::new(token, &account.user_id);
 
     // 文件夹引导：远端结构灌入本地（含 role 映射与 remote_id）
     let folders = match client.folders().await {
@@ -1005,10 +1016,26 @@ async fn graph_sync_account(app: Arc<App>, account: Account, options: SyncOption
         }
     };
 
-    for mailbox in targets {
-        match graph_sync_mailbox(&app, &client, &account, &mailbox, limit).await {
+    // 文件夹级并发（inbox 优先，3 路；SQLite 短持锁，互不影响）
+    let mut targets = targets;
+    targets.sort_by_key(|mailbox| mailbox.role != "inbox");
+    let results: Vec<(String, Result<i64, String>)> = futures_util::stream::iter(targets)
+        .map(|mailbox| {
+            let app = Arc::clone(&app);
+            let client = client.clone();
+            let account = account.clone();
+            async move {
+                let result = graph_sync_mailbox(&app, &client, &account, &mailbox, limit).await;
+                (mailbox.name.clone(), result)
+            }
+        })
+        .buffer_unordered(3)
+        .collect()
+        .await;
+    for (name, result) in results {
+        match result {
             Ok(new_messages) => report.new_messages += new_messages,
-            Err(error) => report.errors.push(format!("{}：{error}", mailbox.name)),
+            Err(error) => report.errors.push(format!("{name}：{error}")),
         }
     }
 
@@ -1053,10 +1080,11 @@ async fn graph_sync_mailbox(
     if delta_link.is_empty() {
         // 首次：只拉最新 limit 封（与 IMAP 的 last_uid 窗口语义一致）
         let messages = client.recent_messages(&remote_id, limit).await?;
-        for message in &messages {
-            if graph_store_message(app, client, account, mailbox.id, message).await? {
+        for (index, message) in messages.iter().enumerate() {
+            if graph_store_header(app, account, mailbox.id, message)? {
                 new_count += 1;
             }
+            app.sync_progress(account.id, &mailbox.name, index as i64 + 1, mailbox.total);
         }
     }
 
@@ -1079,6 +1107,7 @@ async fn graph_sync_mailbox(
 
     let mut page = client.delta_first(&remote_id, if baseline { None } else { Some(delta_link.as_str()) }).await?;
     let mut pages = 0usize;
+    let mut processed = 0i64;
     loop {
         pages += 1;
         if pages > 1000 {
@@ -1108,11 +1137,13 @@ async fn graph_sync_mailbox(
                 if baseline && have_local > 0 && message.received_ms < have_local {
                     continue;
                 }
-                if graph_store_message(app, client, account, mailbox.id, message).await? {
+                if graph_store_header(app, account, mailbox.id, message)? {
                     new_count += 1;
                 }
             }
+            processed += 1;
         }
+        app.sync_progress(account.id, &mailbox.name, processed, mailbox.total);
         if let Some(next) = page.next_link.clone() {
             page = client.delta_page(&next).await?;
             continue;
@@ -1132,18 +1163,14 @@ async fn graph_sync_mailbox(
     Ok(new_count)
 }
 
-/// 下载并入库一封 Graph 邮件（完整 MIME → 复用 mime 解析管线）；返回是否新邮件
-async fn graph_store_message(
+/// 列表直存一封 Graph 邮件（懒加载：delta 列表项已含列表页全部字段，
+/// 正文与附件点开时经 ensure_body 按需补全）；返回是否新邮件
+fn graph_store_header(
     app: &Arc<App>,
-    client: &graph::GraphClient,
     account: &Account,
     mailbox_id: i64,
     message: &graph::GraphMessage,
 ) -> Result<bool, String> {
-    let raw = client.raw_message(&message.id).await?;
-    let path = crate::files::raw_path(&app.data_dir, account.id, mailbox_id, &graph::raw_key(&message.id));
-    crate::files::write_raw(&path, &raw)?;
-
     let ctx = ParseContext {
         account_id: account.id,
         mailbox_id,
@@ -1153,7 +1180,7 @@ async fn graph_store_message(
         flagged: message.flagged,
         answered: false,
         draft: false,
-        size: raw.len() as i64,
+        size: 0,
     };
     let existed: Option<i64> = {
         let conn = app.db();
@@ -1164,15 +1191,11 @@ async fn graph_store_message(
         )
         .ok()
     };
-    let row = match mime::parse_header(&raw, &ctx) {
-        Some(row) => row,
-        None => fallback_graph_header(message, &ctx),
-    };
-    let id = db::message_upsert_remote(&app.db(), &row, &message.id)
+    let row = graph_header_row(message, &ctx);
+    db::message_upsert_remote(&app.db(), &row, &message.id)
         .map_err(|error| format!("保存邮件失败：{error}"))?;
     {
         let conn = app.db();
-        let _ = db::message_set_raw(&conn, id, &path.to_string_lossy());
         if !row.from_addr.is_empty() {
             let _ = db::contacts_touch(&conn, &row.from_addr, &row.from_name, row.date);
         }
@@ -1180,12 +1203,14 @@ async fn graph_store_message(
     Ok(existed.is_none())
 }
 
-/// Graph 列表字段兜底行（MIME 解析失败时）
-fn fallback_graph_header(message: &graph::GraphMessage, ctx: &ParseContext) -> db::HeaderRow {
-    let thread_id = if message.id.is_empty() {
-        uuid::Uuid::new_v4().simple().to_string()
-    } else {
+/// Graph 列表字段 → 本地头部行（懒加载直存；线程键用 conversationId 聚合整个对话）
+fn graph_header_row(message: &graph::GraphMessage, ctx: &ParseContext) -> db::HeaderRow {
+    let thread_id = if !message.conversation_id.is_empty() {
+        format!("g:c:{}", message.conversation_id)
+    } else if !message.id.is_empty() {
         format!("g:{}", message.id)
+    } else {
+        uuid::Uuid::new_v4().simple().to_string()
     };
     db::HeaderRow {
         account_id: ctx.account_id,
@@ -1252,7 +1277,7 @@ async fn graph_push_pending(app: &Arc<App>, account: &Account) {
     let Ok(token) = crate::oauth::access_token(app, account).await else {
         return;
     };
-    let client = graph::GraphClient::new(token);
+    let client = graph::GraphClient::new(token, &account.user_id);
     for (message_id, seen, flagged) in pending {
         let remote_id = {
             let conn = app.db();
@@ -1285,14 +1310,14 @@ async fn fetch_raw_graph(app: &Arc<App>, account: &Account, message_id: i64) -> 
         return Err("这是一封本地邮件，没有可下载的服务器副本".into());
     }
     let token = crate::oauth::access_token(app, account).await?;
-    graph::GraphClient::new(token).raw_message(&remote_id).await
+    graph::GraphClient::new(token, &account.user_id).raw_message(&remote_id).await
 }
 
 /// Graph 账户文件夹发现（新增账户后 / 手动重试）
 pub fn graph_discover(app: Arc<App>, account: &Account) -> Result<(), String> {
     let result = app.rt.block_on(async {
         let token = crate::oauth::access_token(&app, account).await?;
-        let client = graph::GraphClient::new(token);
+        let client = graph::GraphClient::new(token, &account.user_id);
         client
             .folders()
             .await
@@ -1323,7 +1348,7 @@ pub fn graph_discover(app: Arc<App>, account: &Account) -> Result<(), String> {
 pub fn test_account_graph(app: Arc<App>, account: &Account) -> Result<Vec<String>, String> {
     app.rt.block_on(async {
         let token = crate::oauth::access_token(&app, account).await?;
-        let client = graph::GraphClient::new(token);
+        let client = graph::GraphClient::new(token, &account.user_id);
         let me = client.me().await?;
         let name = me
             .get("displayName")
@@ -1344,4 +1369,49 @@ pub fn test_account_graph(app: Arc<App>, account: &Account) -> Result<Vec<String
         }
         Ok(lines)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn graph_message(conversation_id: &str) -> graph::GraphMessage {
+        graph::GraphMessage {
+            id: "msg-1".into(),
+            conversation_id: conversation_id.into(),
+            subject: "  ".into(),
+            from_name: "张三".into(),
+            from_addr: "z@x.com".into(),
+            ..Default::default()
+        }
+    }
+
+    fn parse_ctx() -> ParseContext {
+        ParseContext {
+            account_id: 1,
+            mailbox_id: 2,
+            uid: None,
+            internal_date: 0,
+            seen: false,
+            flagged: false,
+            answered: false,
+            draft: false,
+            size: 0,
+        }
+    }
+
+    #[test]
+    fn graph_header_row_threads_by_conversation() {
+        let row = graph_header_row(&graph_message("conv-9"), &parse_ctx());
+        assert_eq!(row.thread_id, "g:c:conv-9");
+        assert_eq!(row.subject, "(无主题)");
+        assert_eq!(row.from_addr, "z@x.com");
+        assert_eq!(row.message_id, "");
+    }
+
+    #[test]
+    fn graph_header_row_falls_back_to_message_id_thread() {
+        let row = graph_header_row(&graph_message(""), &parse_ctx());
+        assert_eq!(row.thread_id, "g:msg-1");
+    }
 }

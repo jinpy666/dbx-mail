@@ -245,9 +245,18 @@ pub fn account_from_params(params: &Value, id: i64) -> Result<Account, String> {
         display_name,
         username,
         provider: provider.clone(),
-        auth_type: if provider == "graph" { "oauth2".into() } else { "password".into() },
+        auth_type: if provider == "graph" {
+            // 纯后台接入（client_credentials）：无 oauthState 且给了 clientSecret + userId
+            let is_app_only = crate::param_str(params, "oauthState").is_empty()
+                && !crate::param_str(params, "clientSecret").trim().is_empty()
+                && !crate::param_str(params, "userId").trim().is_empty();
+            if is_app_only { crate::model::AUTH_TYPE_APP_ONLY.into() } else { "oauth2".into() }
+        } else {
+            "password".into()
+        },
         tenant_id,
         client_id,
+        user_id: crate::param_str(params, "userId").trim().to_string(),
         imap_host,
         imap_port,
         imap_security,
@@ -270,10 +279,13 @@ pub fn account_from_params(params: &Value, id: i64) -> Result<Account, String> {
         sync_interval: crate::param_int(params, "syncInterval", 5).clamp(0, 240),
         last_sync_at: 0,
         last_error: String::new(),
+        host_bound: false,
+        host_connection_id: String::new(),
     })
 }
 
-fn normalize_security(value: &str) -> String {
+/// 加密方式归一化（hostconn 的宿主连接解析也用它）
+pub(crate) fn normalize_security(value: &str) -> String {
     match value.to_lowercase().as_str() {
         "starttls" => "starttls".into(),
         "none" | "plain" => "none".into(),
@@ -285,6 +297,7 @@ fn normalize_security(value: &str) -> String {
 pub fn add(app: Arc<App>, params: &Value) -> Result<Value, String> {
     let account = account_from_params(params, 0)?;
     // Graph 账户：凭据是 OAuth refresh_token（从 pending 会话认领）
+    let client_secret_param = crate::param_str(params, "clientSecret");
     let credential = if account.provider == "graph" {
         if account.client_id.trim().is_empty() {
             return Err("请填写 Azure 应用的 Client ID".into());
@@ -294,10 +307,18 @@ pub fn add(app: Arc<App>, params: &Value) -> Result<Value, String> {
         }
         let state = crate::param_str(params, "oauthState");
         if state.is_empty() {
-            return Err("请先完成浏览器授权".into());
+            // 纯后台接入（client_credentials）：无浏览器交互，直接访问 userId 的邮箱
+            if client_secret_param.trim().is_empty() {
+                return Err("请先完成浏览器授权，或填入 Client Secret 以纯后台接入".into());
+            }
+            if account.user_id.trim().is_empty() {
+                return Err("纯后台接入需要填写目标邮箱（userId）".into());
+            }
+            String::new()
+        } else {
+            let refresh_token = crate::oauth::claim(&app, &state)?;
+            refresh_token
         }
-        let refresh_token = crate::oauth::claim(&app, &state)?;
-        refresh_token
     } else {
         let password = crate::param_str(params, "password");
         if password.trim().is_empty() {
@@ -321,17 +342,34 @@ pub fn add(app: Arc<App>, params: &Value) -> Result<Value, String> {
             .block_on(sync::test_account(&account, &credential))
             .map_err(|error| format!("连接检测失败：{error}"))?;
     }
-    // Graph 账户的验证即授权本身（refresh_token 已到手），无需额外探测
+    // 浏览器授权的 Graph 账户：验证即授权本身（refresh_token 已到手），无需额外探测；
+    // 纯后台账户：验证 = 换应用令牌 + 探测目标邮箱的文件夹
+    if account.provider == "graph" && credential.is_empty() && params.get("verify").and_then(Value::as_bool).unwrap_or(true) {
+        app.rt
+            .block_on(async {
+                let authority = crate::oauth::authority_base();
+                let set = crate::oauth::client_credentials_token(&authority, &account.tenant_id, &account.client_id, client_secret_param.trim()).await?;
+                crate::graph::GraphClient::new(set.access_token, &account.user_id).folders().await?;
+                Ok::<(), String>(())
+            })
+            .map_err(|error| format!("后台接入验证失败：{error}"))?;
+    }
 
     let reference = if account.provider == "graph" {
         format!("oauth2:{}", account.email)
     } else {
         format!("mail:{}", account.email)
     };
-    let vault = app
-        .secrets
-        .save(&reference, &credential)
-        .map_err(|error| if account.provider == "graph" { format!("保存授权凭据失败：{error}") } else { format!("保存密码失败：{error}") })?;
+    let vault = if credential.is_empty() {
+        // 纯后台接入：没有 refresh_token；client_secret 存独立通道（引用在插入后落库）
+        app.secrets
+            .save(&format!("graphsecret:{}", account.email), client_secret_param.trim())
+            .map_err(|error| format!("保存应用凭据失败：{error}"))?
+    } else {
+        app.secrets
+            .save(&reference, &credential)
+            .map_err(|error| if account.provider == "graph" { format!("保存授权凭据失败：{error}") } else { format!("保存密码失败：{error}") })?
+    };
 
     let mut account = account;
     let color = {
@@ -349,6 +387,20 @@ pub fn add(app: Arc<App>, params: &Value) -> Result<Value, String> {
             .map_err(|error| format!("保存账户失败：{error}"))?
     };
     account.id = id;
+
+    // client_secret 引用落库：纯后台接入（secret 已在 vault 分支保存）与
+    // 机密客户端（浏览器授权 + clientSecret，这里保存）都要落
+    if account.provider == "graph" && !client_secret_param.trim().is_empty() {
+        let secret_reference = format!("graphsecret:{}", account.email);
+        if !credential.is_empty() {
+            app.secrets
+                .save(&secret_reference, client_secret_param.trim())
+                .map_err(|error| format!("保存应用凭据失败：{error}"))?;
+        }
+        let conn = app.db();
+        db::account_set_client_secret_ref(&conn, id, &secret_reference)
+            .map_err(|error| format!("保存账户失败：{error}"))?;
+    }
 
     // 文件夹发现失败不阻塞新增：可能只是暂时离线
     let mut warnings = Vec::new();
@@ -392,6 +444,17 @@ pub fn update(app: Arc<App>, params: &Value) -> Result<Value, String> {
             app.secrets
                 .save(&reference, &refresh)
                 .map_err(|error| format!("保存授权凭据失败：{error}"))?;
+        }
+        // 机密客户端：允许更新 clientSecret（旧引用指向的值被覆盖）
+        let client_secret_param = crate::param_str(params, "clientSecret");
+        if !client_secret_param.trim().is_empty() {
+            let secret_reference = format!("graphsecret:{}", account.email);
+            app.secrets
+                .save(&secret_reference, client_secret_param.trim())
+                .map_err(|error| format!("保存应用凭据失败：{error}"))?;
+            let conn = app.db();
+            db::account_set_client_secret_ref(&conn, id, &secret_reference)
+                .map_err(|error| format!("保存账户失败：{error}"))?;
         }
         return Ok(json!({ "account": account }));
     }

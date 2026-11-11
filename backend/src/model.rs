@@ -4,6 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 纯后台接入（client_credentials）的 auth_type：无 refresh_token，过期即重取应用令牌
+pub const AUTH_TYPE_APP_ONLY: &str = "oauth2_app";
+
 /// 账户（不含密码；密码单独存放在系统凭据库或本地密钥加密文件）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,7 +17,7 @@ pub struct Account {
     pub username: String,
     /// imap / graph（graph = Microsoft 365 / Outlook.com，走 Graph API）
     pub provider: String,
-    /// password / oauth2
+    /// password / oauth2 / AUTH_TYPE_APP_ONLY
     pub auth_type: String,
     /// OAuth2 租户（graph 账户）：common / organizations / consumers / GUID
     pub tenant_id: String,
@@ -32,6 +35,17 @@ pub struct Account {
     pub sync_interval: i64,
     pub last_sync_at: i64,
     pub last_error: String,
+    /// 来自 DBX 宿主连接管理（connection-provider）的账户：
+    /// 连接期凭据只在内存会话里，不落本地密钥库
+    #[serde(default)]
+    pub host_bound: bool,
+    /// 宿主连接 id（connection.id），断开后清空
+    #[serde(default)]
+    pub host_connection_id: String,
+    /// 纯后台接入（client_credentials）的目标邮箱：Graph 请求走
+    /// /users/{user_id}/...；浏览器授权账户为空（走 /me）
+    #[serde(default)]
+    pub user_id: String,
 }
 
 /// 邮箱（服务器文件夹）
@@ -272,4 +286,15 @@ pub struct SyncReport {
     pub updated: i64,
     pub errors: Vec<String>,
     pub synced_at: i64,
+}
+
+/// 同步进度（sync/status 展示「同步中 N/M」）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncProgress {
+    pub account_id: i64,
+    /// 当前正在同步的文件夹名
+    pub mailbox: String,
+    pub done: i64,
+    pub total: i64,
 }

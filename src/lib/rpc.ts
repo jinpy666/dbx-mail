@@ -281,8 +281,13 @@ export async function probeSidecar(): Promise<boolean> {
 
 /* ---------------- 启动 ---------------- */
 
-export function bootstrap(): Promise<Bootstrap> {
-  return call('app/bootstrap')
+export function bootstrap(accountId?: number): Promise<Bootstrap> {
+  return call('app/bootstrap', accountId ? { accountId } : undefined)
+}
+
+/** 宿主连接作用域：connectionId → 绑定账户（独立邮箱 tab），未绑定返回 null */
+export function accountByConnection(connectionId: string): Promise<{ account: Account | null }> {
+  return call('account/byConnection', { connectionId })
 }
 
 export function appInfo(): Promise<{ version: string; dataDir: string; vault: string; platform: string }> {
@@ -327,9 +332,10 @@ export type OauthStatus =
   | { status: 'failed'; error: string }
   | { status: 'expired' }
 
-/** 发起 OAuth 授权：返回浏览器授权 URL（回环回调由 sidecar 接收） */
-export function oauthBegin(tenantId: string, clientId: string): Promise<OauthBegin> {
-  return call('account/oauthBegin', { tenantId, clientId }, NETWORK_TIMEOUT)
+/** 发起 OAuth 授权：返回浏览器授权 URL（回环回调由 sidecar 接收）。
+ *  机密客户端传 clientSecret（仅驻内存，用于回调时的 code 交换）。 */
+export function oauthBegin(tenantId: string, clientId: string, clientSecret?: string): Promise<OauthBegin> {
+  return call('account/oauthBegin', { tenantId, clientId, ...(clientSecret ? { clientSecret } : {}) }, NETWORK_TIMEOUT)
 }
 
 export function oauthStatus(state: string): Promise<OauthStatus> {
@@ -349,7 +355,11 @@ export function syncNow(params: { accountId?: number; mailboxId?: number; limit?
   return call('sync/now', params, NETWORK_TIMEOUT)
 }
 
-export function syncStatus(): Promise<{ running: number[]; log: Array<{ accountId: number; at: number; ok: boolean; message: string }> }> {
+export function syncStatus(): Promise<{
+  running: number[]
+  progress: Array<{ accountId: number; mailbox: string; done: number; total: number }>
+  log: Array<{ accountId: number; at: number; ok: boolean; message: string }>
+}> {
   return call('sync/status')
 }
 

@@ -155,33 +155,47 @@ async fn token_request(authority: &str, tenant: &str, form: &[(&str, &str)]) -> 
     TokenSet::from_response(&value, "")
 }
 
-/// 授权码换 token
-pub async fn exchange_code(authority: &str, tenant: &str, client_id: &str, redirect_uri: &str, code: &str, verifier: &str) -> Result<TokenSet, String> {
-    token_request(
-        authority,
-        tenant,
-        &[
-            ("grant_type", "authorization_code"),
-            ("client_id", client_id),
-            ("code", code),
-            ("redirect_uri", redirect_uri),
-            ("code_verifier", verifier),
-            ("scope", SCOPES),
-        ],
-    )
-    .await
+/// 授权码换 token（机密客户端可选 client_secret）
+pub async fn exchange_code(authority: &str, tenant: &str, client_id: &str, redirect_uri: &str, code: &str, verifier: &str, client_secret: Option<&str>) -> Result<TokenSet, String> {
+    let mut form = vec![
+        ("grant_type", "authorization_code"),
+        ("client_id", client_id),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("code_verifier", verifier),
+        ("scope", SCOPES),
+    ];
+    if let Some(secret) = client_secret {
+        form.push(("client_secret", secret));
+    }
+    token_request(authority, tenant, &form).await
 }
 
-/// 刷新 access_token；微软会轮换 refresh_token，调用方必须回存新值
-pub async fn refresh_token(authority: &str, tenant: &str, client_id: &str, refresh: &str) -> Result<TokenSet, String> {
+/// 刷新 access_token；微软会轮换 refresh_token，调用方必须回存新值。
+/// 机密客户端需带 client_secret。
+pub async fn refresh_token(authority: &str, tenant: &str, client_id: &str, refresh: &str, client_secret: Option<&str>) -> Result<TokenSet, String> {
+    let mut form = vec![
+        ("grant_type", "refresh_token"),
+        ("client_id", client_id),
+        ("refresh_token", refresh),
+        ("scope", SCOPES),
+    ];
+    if let Some(secret) = client_secret {
+        form.push(("client_secret", secret));
+    }
+    token_request(authority, tenant, &form).await
+}
+
+/// client_credentials 应用令牌（纯后台接入）：无 refresh_token，过期即重取
+pub async fn client_credentials_token(authority: &str, tenant: &str, client_id: &str, client_secret: &str) -> Result<TokenSet, String> {
     token_request(
         authority,
         tenant,
         &[
-            ("grant_type", "refresh_token"),
+            ("grant_type", "client_credentials"),
             ("client_id", client_id),
-            ("refresh_token", refresh),
-            ("scope", SCOPES),
+            ("client_secret", client_secret),
+            ("scope", "https://graph.microsoft.com/.default"),
         ],
     )
     .await
@@ -199,7 +213,8 @@ pub struct CachedToken {
 /// 内存中的 access_token 缓存（App 持有）
 pub type TokenCache = Mutex<HashMap<i64, CachedToken>>;
 
-/// 取账户可用的 access_token；必要时用 refresh_token 换新并回存轮换值
+/// 取账户可用的 access_token；必要时用 refresh_token 换新并回存轮换值。
+/// 纯后台账户（auth_type = "oauth2_app"）走 client_credentials，无 refresh_token。
 pub async fn access_token(app: &Arc<App>, account: &Account) -> Result<String, String> {
     if let Some(cached) = app
         .token_cache
@@ -213,6 +228,20 @@ pub async fn access_token(app: &Arc<App>, account: &Account) -> Result<String, S
         }
     }
 
+    let set = if account.auth_type == crate::model::AUTH_TYPE_APP_ONLY {
+        app_token_set(app, account).await?
+    } else {
+        refresh_set(app, account).await?
+    };
+    app.token_cache
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(account.id, CachedToken { access_token: set.access_token.clone(), expires_at: set.expires_at });
+    Ok(set.access_token)
+}
+
+/// refresh_token 换新（机密客户端带 client_secret），轮换值立即回存
+async fn refresh_set(app: &Arc<App>, account: &Account) -> Result<TokenSet, String> {
     let reference = {
         let conn = app.db();
         crate::db::account_password_ref(&conn, account.id).map_err(|error| format!("读取账户失败：{error}"))?
@@ -224,20 +253,52 @@ pub async fn access_token(app: &Arc<App>, account: &Account) -> Result<String, S
         .secrets
         .load(&reference)
         .map_err(|error| format!("读取授权凭据失败：{error}"))?;
-
+    // 机密客户端：token 交换与刷新都要带 client_secret
+    let client_secret = load_client_secret(app, account.id)?;
     let authority = authority_base();
-    let set = refresh_token(&authority, &account.tenant_id, &account.client_id, &refresh).await?;
+    let set = refresh_token(
+        &authority,
+        &account.tenant_id,
+        &account.client_id,
+        &refresh,
+        client_secret.as_deref(),
+    )
+    .await?;
     // refresh_token 轮换：新值立即回存
     if set.refresh_token != refresh {
         app.secrets
             .save(&reference, &set.refresh_token)
             .map_err(|error| format!("保存授权凭据失败：{error}"))?;
     }
-    app.token_cache
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert(account.id, CachedToken { access_token: set.access_token.clone(), expires_at: set.expires_at });
-    Ok(set.access_token)
+    Ok(set)
+}
+
+/// client_credentials 换应用令牌（无 refresh_token，过期重取）
+async fn app_token_set(app: &Arc<App>, account: &Account) -> Result<TokenSet, String> {
+    let secret = load_client_secret(app, account.id)?
+        .ok_or_else(|| "纯后台账户缺少 Client Secret，请更新账户配置".to_string())?;
+    let authority = authority_base();
+    client_credentials_token(&authority, &account.tenant_id, &account.client_id, &secret).await
+}
+
+/// 读取账户的 client_secret（机密客户端/纯后台），未配置时返回 None。
+/// 宿主连接会话优先：纯后台账户的 secret 只在内存里，账户行的引用列为空。
+fn load_client_secret(app: &Arc<App>, account_id: i64) -> Result<Option<String>, String> {
+    if let Some(secret) = crate::hostconn::session_client_secret(app, account_id) {
+        return Ok(Some(secret));
+    }
+    let reference = {
+        let conn = app.db();
+        crate::db::account_client_secret_ref(&conn, account_id).map_err(|error| format!("读取账户失败：{error}"))?
+    };
+    if reference.is_empty() {
+        return Ok(None);
+    }
+    let secret = app
+        .secrets
+        .load(&reference)
+        .map_err(|error| format!("读取应用凭据失败：{error}"))?;
+    Ok(Some(secret))
 }
 
 /* ---------------- 待完成的授权（向导流程） ---------------- */
@@ -247,6 +308,8 @@ pub async fn access_token(app: &Arc<App>, account: &Account) -> Result<String, S
 pub struct PendingAuth {
     pub tenant_id: String,
     pub client_id: String,
+    /// 机密客户端的 client_secret（仅驻内存，用于回调时的 code 交换）
+    pub client_secret: String,
     pub verifier: String,
     pub redirect_uri: String,
     pub created_at: i64,
@@ -257,7 +320,7 @@ pub struct PendingAuth {
 pub type PendingMap = Mutex<HashMap<String, PendingAuth>>;
 
 /// 发起授权：起回环监听、返回授权 URL（在 tokio 运行时里调用）
-pub async fn begin(app: &Arc<App>, tenant_id: &str, client_id: &str) -> Result<(String, String), String> {
+pub async fn begin(app: &Arc<App>, tenant_id: &str, client_id: &str, client_secret: &str) -> Result<(String, String), String> {
     let tenant = if tenant_id.trim().is_empty() { "common" } else { tenant_id.trim() };
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -276,6 +339,7 @@ pub async fn begin(app: &Arc<App>, tenant_id: &str, client_id: &str) -> Result<(
             PendingAuth {
                 tenant_id: tenant.to_string(),
                 client_id: client_id.to_string(),
+                client_secret: client_secret.trim().to_string(),
                 verifier,
                 redirect_uri,
                 created_at: crate::now_ms(),
@@ -293,13 +357,14 @@ pub async fn begin(app: &Arc<App>, tenant_id: &str, client_id: &str) -> Result<(
                 let context = {
                     let map = task_app.oauth_pending.lock().unwrap_or_else(|error| error.into_inner());
                     map.get(&state_task).map(|pending| {
-                        (pending.tenant_id.clone(), pending.client_id.clone(), pending.redirect_uri.clone(), pending.verifier.clone())
+                        (pending.tenant_id.clone(), pending.client_id.clone(), pending.redirect_uri.clone(), pending.verifier.clone(), pending.client_secret.clone())
                     })
                 };
                 match context {
-                    Some((tenant, client_id, redirect_uri, verifier)) => {
+                    Some((tenant, client_id, redirect_uri, verifier, client_secret)) => {
                         let authority = authority_base();
-                        exchange_code(&authority, &tenant, &client_id, &redirect_uri, &code, &verifier)
+                        let secret = if client_secret.is_empty() { None } else { Some(client_secret.as_str()) };
+                        exchange_code(&authority, &tenant, &client_id, &redirect_uri, &code, &verifier, secret)
                             .await
                             .map(|set| set.refresh_token)
                     }

@@ -20,6 +20,9 @@ interface FormState {
   signature: string
   tenantId: string
   clientId: string
+  graphMode: 'browser' | 'app'
+  clientSecret: string
+  userId: string
 }
 
 const EMPTY: FormState = {
@@ -35,6 +38,9 @@ const EMPTY: FormState = {
   signature: '',
   tenantId: 'common',
   clientId: '',
+  graphMode: 'browser',
+  clientSecret: '',
+  userId: '',
 }
 
 type ProviderChoice = 'auto' | 'imap' | 'graph'
@@ -119,7 +125,19 @@ export function AccountWizard() {
     provider: 'graph',
     tenantId: form.tenantId.trim() || 'common',
     clientId: form.clientId.trim(),
+    ...(form.clientSecret.trim() ? { clientSecret: form.clientSecret.trim() } : {}),
     oauthState,
+  })
+
+  /** 纯后台接入（client_credentials）：无浏览器交互，直接访问 userId 邮箱 */
+  const graphAppPayload = () => ({
+    ...basePayload(),
+    provider: 'graph',
+    tenantId: form.tenantId.trim() || 'common',
+    clientId: form.clientId.trim(),
+    clientSecret: form.clientSecret.trim(),
+    userId: (form.userId.trim() || form.email.trim()),
+    verify: true,
   })
 
   const test = async () => {
@@ -154,7 +172,7 @@ export function AccountWizard() {
     setError('')
     setAuthPhase('auth')
     try {
-      const begin = await api.oauthBegin(form.tenantId.trim() || 'common', form.clientId.trim())
+      const begin = await api.oauthBegin(form.tenantId.trim() || 'common', form.clientId.trim(), form.clientSecret.trim() || undefined)
       authStateRef.current = begin.state
       setAuthUrl(begin.authorizeUrl)
       window.open(begin.authorizeUrl, '_blank', 'noopener')
@@ -188,6 +206,25 @@ export function AccountWizard() {
 
   const submit = async () => {
     if (isGraph) {
+      if (form.graphMode === 'app') {
+        // 纯后台接入：无浏览器交互，直接创建并验证
+        if (!form.clientSecret.trim()) {
+          setError(t(locale, 'wizard.clientSecretRequired'))
+          return
+        }
+        setBusy(true)
+        setError('')
+        try {
+          await addAccount(graphAppPayload())
+          toast.success(t(locale, 'wizard.added'))
+          closeDialog()
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : String(cause))
+        } finally {
+          setBusy(false)
+        }
+        return
+      }
       await authorizeAndAdd()
       return
     }
@@ -269,6 +306,50 @@ export function AccountWizard() {
                 />
                 <span className="hint">{t(locale, 'wizard.clientIdHint')}</span>
               </div>
+              <div className="field">
+                <span className="field-label">{t(locale, 'wizard.graphMode')}</span>
+                <select
+                  className="select"
+                  value={form.graphMode}
+                  onChange={(event) => update({ graphMode: event.target.value as 'browser' | 'app' })}
+                >
+                  <option value="browser">{t(locale, 'wizard.graphMode.browser')}</option>
+                  <option value="app">{t(locale, 'wizard.graphMode.app')}</option>
+                </select>
+              </div>
+              <div className="field">
+                <span className="field-label">
+                  {t(locale, 'wizard.clientSecret')}
+                  {form.graphMode === 'app' ? ' *' : ''}
+                </span>
+                <input
+                  className="input"
+                  type="password"
+                  value={form.clientSecret}
+                  onChange={(event) => update({ clientSecret: event.target.value })}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') void submit()
+                  }}
+                />
+                <span className="hint">
+                  {t(locale, form.graphMode === 'app' ? 'wizard.clientSecretHint.app' : 'wizard.clientSecretHint.browser')}
+                </span>
+              </div>
+              {form.graphMode === 'app' && (
+                <div className="field">
+                  <span className="field-label">{t(locale, 'wizard.userId')}</span>
+                  <input
+                    className="input"
+                    value={form.userId}
+                    placeholder={form.email}
+                    onChange={(event) => update({ userId: event.target.value })}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') void submit()
+                    }}
+                  />
+                  <span className="hint">{t(locale, 'wizard.userIdHint')}</span>
+                </div>
+              )}
               <div
                 style={{
                   display: 'flex',
@@ -283,7 +364,7 @@ export function AccountWizard() {
                 }}
               >
                 <CheckCircle2 size={14} style={{ marginTop: 1, flex: 'none' }} />
-                <span>{t(locale, 'wizard.azureGuide')}</span>
+                <span>{t(locale, form.graphMode === 'app' ? 'wizard.appGuide' : 'wizard.azureGuide')}</span>
               </div>
               {authPhase === 'auth' && authUrl && (
                 <div className="field">

@@ -40,13 +40,13 @@ const nextId = () => `mock-${++serial}`
 let state
 function resetState() {
   serial = 0
-  const m1 = { id: nextId(), received: '2024-01-01T10:00:00Z', seen: false, flagged: false, hasAttachments: false,
+  const m1 = { id: nextId(), conversation: 'conv-weekly', received: '2024-01-01T10:00:00Z', seen: false, flagged: false, hasAttachments: false,
     mime: mime({ subject: '第一封：项目周报', from: '张三 <zhangsan@example.com>', to: 'user@example.com', messageId: '<m1@example.com>', date: 'Mon, 1 Jan 2024 10:00:00 +0000' }) }
-  const m2 = { id: nextId(), received: '2024-01-01T09:00:00Z', seen: true, flagged: true, hasAttachments: false,
+  const m2 = { id: nextId(), conversation: 'conv-weekly', received: '2024-01-01T09:00:00Z', seen: true, flagged: true, hasAttachments: false,
     mime: mime({ subject: '第二封：回复：项目周报', from: '李四 <lisi@example.com>', to: 'user@example.com', messageId: '<m2@example.com>', date: 'Mon, 1 Jan 2024 09:00:00 +0000', inReplyTo: '<m1@example.com>', references: '<m1@example.com>' }) }
-  const m3 = { id: nextId(), received: '2024-01-01T08:00:00Z', seen: false, flagged: false, hasAttachments: false,
+  const m3 = { id: nextId(), conversation: 'conv-login', received: '2024-01-01T08:00:00Z', seen: false, flagged: false, hasAttachments: false,
     mime: mime({ subject: '第三封：登录提醒', from: '通知 <noreply@example.com>', to: 'user@example.com', messageId: '<m3@example.com>', date: 'Mon, 1 Jan 2024 08:00:00 +0000' }) }
-  const sent = { id: nextId(), received: '2024-01-01T07:00:00Z', seen: true, flagged: false, hasAttachments: false,
+  const sent = { id: nextId(), conversation: 'conv-sent', received: '2024-01-01T07:00:00Z', seen: true, flagged: false, hasAttachments: false,
     mime: mime({ subject: '发出：你好', from: '我 <user@example.com>', to: 'friend@example.com', messageId: '<s1@example.com>', date: 'Mon, 1 Jan 2024 07:00:00 +0000' }) }
   state = {
     folders: [
@@ -69,6 +69,7 @@ function resetState() {
     usedRefresh: new Set(),
     currentAccess: null,
     accessSeq: 0,
+    appSecret: 'app-secret-check', // client_credentials 校验用
     // 收到的发送内容（校验线程头）
     sentMimes: [],
     // sidecar 回调地址（authorize 时注册）
@@ -82,15 +83,32 @@ function folder(id) {
   return state.folders.find((item) => item.id === id)
 }
 
+/** 解码 MIME encoded-word（=?utf-8?B?...?= / =?utf-8?Q?...?=）；真实 Graph 的 subject 字段是解码后的明文 */
+function decodeEncodedWord(raw) {
+  return raw.replace(/=\?([^?]+)\?([bBqQ])\?([^?]*)\?=/g, (_, charset, encoding, text) => {
+    try {
+      if (encoding.toLowerCase() === 'b') {
+        return Buffer.from(text, 'base64').toString(charset.toLowerCase() === 'utf-8' ? 'utf8' : charset)
+      }
+      const qEncoded = String(text).replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+      return Buffer.from(qEncoded, 'binary').toString(charset.toLowerCase() === 'utf-8' ? 'utf8' : charset)
+    } catch {
+      return text
+    }
+  })
+}
+
 function messageJson(message) {
   const header = (name) => message.mime.split('\r\n\r\n')[0].split('\r\n').find((line) => line.startsWith(`${name}:`)) || ''
-  const from = header('From:').slice(5).trim()
+  const from = header('From').slice(5).trim()
   const nameMatch = from.match(/^(.*)</)
   const addrMatch = from.match(/<(.*)>/)
-  const to = header('To:').slice(3).trim()
+  const to = header('To').slice(3).trim()
   return {
     id: message.id,
-    subject: header('Subject:').slice(8).trim(),
+    // 真实 Graph 每封邮件都有 conversationId；未标注的夹具退化为独立会话
+    conversationId: message.conversation || message.id,
+    subject: decodeEncodedWord(header('Subject').slice(8).trim()),
     from: { emailAddress: { name: nameMatch ? nameMatch[1].trim() : from, address: addrMatch ? addrMatch[1] : from } },
     toRecipients: to.split(',').map((address) => ({ emailAddress: { address: address.trim() } })),
     receivedDateTime: message.received,
@@ -122,7 +140,7 @@ export function startMockGraph() {
     request.on('end', () => {
       const body = Buffer.concat(chunks)
       const url = new URL(request.url, baseUrl(request))
-      const path = url.pathname
+      let path = url.pathname
       const base = baseUrl(request)
       const bearer = (request.headers.authorization || '').replace(/^Bearer\s+/, '')
 
@@ -230,11 +248,27 @@ export function startMockGraph() {
               refresh_token: state.currentRefresh,
             })
           }
+          if (grant === 'client_credentials') {
+            // 纯后台接入：校验 client_secret，发无 refresh_token 的应用令牌
+            const secret = form.get('client_secret')
+            if (!secret || secret !== state.appSecret) {
+              return json(response, 401, { error: 'invalid_client', error_description: 'client_secret 校验失败' })
+            }
+            state.currentAccess = `at-${++state.accessSeq}`
+            return json(response, 200, {
+              token_type: 'Bearer',
+              scope: 'https://graph.microsoft.com/.default',
+              expires_in: 3600,
+              access_token: state.currentAccess,
+            })
+          }
           return json(response, 400, { error: 'unsupported_grant_type' })
         }
 
         /* ---------- Graph：鉴权 ---------- */
         if (path.startsWith('/v1.0/')) {
+          // 纯后台接入走 /v1.0/users/{id}/...，与 /me 同构，归一化后共用路由
+          path = path.replace(/^\/v1\.0\/users\/[^/]+/, '/v1.0/me')
           if (bearer !== state.currentAccess) {
             return json(response, 401, { error: { code: 'InvalidAuthenticationToken', message: `token 过期（收到 ${bearer || '空'}，期望 ${state.currentAccess}）` } })
           }

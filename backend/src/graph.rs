@@ -28,6 +28,8 @@ pub struct GraphMessage {
     pub id: String,
     /// delta 里的 `@removed`（远端已删除）
     pub removed: bool,
+    /// 会话标识：懒加载入库时用作线程聚合键
+    pub conversation_id: String,
     pub subject: String,
     pub from_name: String,
     pub from_addr: String,
@@ -59,20 +61,30 @@ pub struct DeltaPage {
     pub delta_link: Option<String>,
 }
 
+/// Graph REST 客户端；reqwest::Client 内部是连接池，Clone 供并发同步共用
+#[derive(Clone)]
 pub struct GraphClient {
     http: reqwest::Client,
+    /// 含路径段：{graph_base}/v1.0/me 或 {graph_base}/v1.0/users/{user_id}
     base: String,
     token: String,
 }
 
 impl GraphClient {
-    pub fn new(access_token: String) -> Self {
+    /// user_id 非空 → 纯后台接入（client_credentials），访问该用户邮箱；
+    /// 为空 → 浏览器授权账户，走 /me。
+    pub fn new(access_token: String, user_id: &str) -> Self {
+        let segment = if user_id.trim().is_empty() {
+            "me".to_string()
+        } else {
+            format!("users/{}", user_id.trim())
+        };
         Self {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()
                 .unwrap_or_default(),
-            base: oauth::graph_base(),
+            base: format!("{}/v1.0/{}", oauth::graph_base(), segment),
             token: access_token,
         }
     }
@@ -131,19 +143,19 @@ impl GraphClient {
 
     /// 授权/连通性验证
     pub async fn me(&self) -> Result<Value, String> {
-        self.get_json(&format!("{}/v1.0/me", self.base)).await
+        self.get_json(&format!("{}", self.base)).await
     }
 
     /// 单个文件夹（同步后刷新计数用）
     pub async fn folder(&self, folder_id: &str) -> Result<GraphFolder, String> {
-        let value = self.get_json(&format!("{}/v1.0/me/mailFolders/{folder_id}", self.base)).await?;
+        let value = self.get_json(&format!("{}/mailFolders/{folder_id}", self.base)).await?;
         folder_from(&value).ok_or_else(|| "文件夹响应缺少 id".to_string())
     }
 
     /// 全部可见文件夹（含子文件夹，深度 ≤3）
     pub async fn folders(&self) -> Result<Vec<GraphFolder>, String> {
         let mut result = Vec::new();
-        let mut url = format!("{}/v1.0/me/mailFolders?$top=99", self.base);
+        let mut url = format!("{}/mailFolders?$top=99", self.base);
         loop {
             let page = self.get_json(&url).await?;
             let items = page.get("value").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -168,7 +180,7 @@ impl GraphClient {
         if depth > 3 {
             return Ok(());
         }
-        let mut url = format!("{}/v1.0/me/mailFolders/{parent_id}/childFolders?$top=99", self.base);
+        let mut url = format!("{}/mailFolders/{parent_id}/childFolders?$top=99", self.base);
         loop {
             let page = self.get_json(&url).await?;
             let items = page.get("value").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -196,7 +208,7 @@ impl GraphClient {
         let url = match delta_link.filter(|link| !link.is_empty()) {
             Some(link) => link.to_string(),
             None => format!(
-                "{}/v1.0/me/mailFolders/{folder_id}/messages/delta?$top=50&$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,flag,hasAttachments,bodyPreview",
+                "{}/mailFolders/{folder_id}/messages/delta?$top=50&$select=id,subject,conversationId,from,toRecipients,ccRecipients,receivedDateTime,isRead,flag,hasAttachments,bodyPreview",
                 self.base
             ),
         };
@@ -207,7 +219,7 @@ impl GraphClient {
     pub async fn recent_messages(&self, folder_id: &str, limit: usize) -> Result<Vec<GraphMessage>, String> {
         let mut result = Vec::new();
         let mut url = format!(
-            "{}/v1.0/me/mailFolders/{folder_id}/messages?$top={}&$orderBy=receivedDateTime desc&$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,flag,hasAttachments,bodyPreview",
+            "{}/mailFolders/{folder_id}/messages?$top={}&$orderBy=receivedDateTime desc&$select=id,subject,conversationId,from,toRecipients,ccRecipients,receivedDateTime,isRead,flag,hasAttachments,bodyPreview",
             self.base,
             limit.clamp(1, 1000)
         );
@@ -234,7 +246,7 @@ impl GraphClient {
         let response = self
             .request(
                 reqwest::Method::GET,
-                &format!("{}/v1.0/me/messages/{message_id}/$value", self.base),
+                &format!("{}/messages/{message_id}/$value", self.base),
                 None,
                 None,
                 "",
@@ -281,7 +293,7 @@ impl GraphClient {
     }
 
     fn message_url(&self, message_id: &str) -> String {
-        format!("{}/v1.0/me/messages/{message_id}", self.base)
+        format!("{}/messages/{message_id}", self.base)
     }
 
     /* ---------------- 发送 ---------------- */
@@ -296,7 +308,7 @@ impl GraphClient {
             return self.send_mime_via_session(mime).await;
         }
         let draft = self
-            .send_json(reqwest::Method::POST, &format!("{}/v1.0/me/messages", self.base), json!({}))
+            .send_json(reqwest::Method::POST, &format!("{}/messages", self.base), json!({}))
             .await?;
         let draft_id = draft
             .get("id")
@@ -353,7 +365,7 @@ impl GraphClient {
             "ccRecipients": recipients(&parsed.header.cc_addrs),
         });
         let draft = self
-            .send_json(reqwest::Method::POST, &format!("{}/v1.0/me/messages", self.base), message)
+            .send_json(reqwest::Method::POST, &format!("{}/messages", self.base), message)
             .await?;
         let draft_id = draft
             .get("id")
@@ -497,6 +509,7 @@ fn parse_delta_message(item: &Value) -> GraphMessage {
     GraphMessage {
         id: item.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
         removed: item.get("@removed").is_some(),
+        conversation_id: item.get("conversationId").and_then(Value::as_str).unwrap_or("").to_string(),
         subject: item.get("subject").and_then(Value::as_str).unwrap_or("").to_string(),
         from_name: item.pointer("/from/emailAddress/name").and_then(Value::as_str).unwrap_or("").to_string(),
         from_addr: item.pointer("/from/emailAddress/address").and_then(Value::as_str).unwrap_or("").to_string(),
@@ -618,5 +631,19 @@ mod tests {
         let value = recipients(&vec!["a@x.com".to_string(), "b@x.com".to_string()]);
         assert_eq!(value[0]["emailAddress"]["address"], "a@x.com");
         assert_eq!(value.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn parse_delta_extracts_conversation_id() {
+        let value: Value = serde_json::from_str(
+            r#"{"value":[
+                {"id":"m1","conversationId":"AAkALgA=","subject":"你好"},
+                {"id":"m2","subject":"无会话"}
+            ]}"#,
+        )
+        .unwrap();
+        let page = parse_delta(&value);
+        assert_eq!(page.messages[0].conversation_id, "AAkALgA=");
+        assert_eq!(page.messages[1].conversation_id, "");
     }
 }
